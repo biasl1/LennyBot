@@ -1,0 +1,40 @@
+# Remove the incorrect filepath comment and properly add the models directory
+cat > .gitignore << 'EOF'
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment
+.env
+.venv
+.venv_py311/
+env/
+venv/
+ENV/
+
+# Logs
+logs/
+*.log
+
+# Database
+chromadb/
+
+# OS files
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Model files
+src/models/
+src/models/intent_classifier/pytorch_model.bin
+src/models/*/cache/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+EOF
