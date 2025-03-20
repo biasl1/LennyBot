@@ -9,14 +9,40 @@ from modules.database import get_pin_collection
 # Define active conversations
 active_conversations = {}  # Track active conversations by chat_id
 
-def update_conversation_state(chat_id, intent, details=None):
-    """Track the state of active conversations."""
+def update_conversation_state(chat_id, intent, details=None, increment_turn=False):
+    """Track the state of active conversations with improved context maintenance."""
+    global active_conversations
+    
+    # Initialize if not exists
+    if chat_id not in active_conversations:
+        active_conversations[chat_id] = {
+            "current_intent": None,
+            "turns": 0,
+            "last_update": time.time(),
+            "details": {}
+        }
+    
+    if intent is None:
+        # Reset conversation
+        active_conversations.pop(chat_id, None)
+        return
+    
+    # Update the conversation state
+    state = active_conversations[chat_id]
+    
+    # Keep existing details and update with new ones
+    current_details = state.get("details", {})
+    if details:
+        current_details.update(details)
+    
     active_conversations[chat_id] = {
         "current_intent": intent,
-        "details": details or {},
+        "turns": state["turns"] + (1 if increment_turn else 0),
         "last_update": time.time(),
-        "turns": active_conversations.get(chat_id, {}).get("turns", 0) + 1
+        "details": current_details
     }
+    
+    logging.info(f"Updated conversation state for {chat_id}: intent={intent}, turns={active_conversations[chat_id]['turns']}, details={current_details}")
     
 def get_conversation_state(chat_id):
     """Get the current conversation state."""

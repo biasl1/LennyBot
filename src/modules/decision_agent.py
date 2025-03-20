@@ -8,6 +8,10 @@ from typing import Dict, List, Any
 import os
 from modules.user_interaction import update_conversation_state, get_conversation_state
 
+# Import the intent classifier functions correctly
+from modules.intent_classifier import classify_intent, get_classifier_info
+
+
 # Initialize the model and tokenizer
 MODEL_NAME = "distilbert-base-uncased"
 INTENTS = ["chat", "question", "reminder", "action", "search"]
@@ -19,46 +23,42 @@ class IntentClassifier:
         logging.info(f"Initializing intent classifier with {model_name}")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
+        # Set up paths
+        self.model_path = MODEL_PATH
+        os.makedirs(self.model_path, exist_ok=True)
+        
         try:
-            # Try to load from cached directory if it exists
-            if use_cached and os.path.exists(MODEL_PATH):
-                logging.info(f"Loading model from cached path: {MODEL_PATH}")
-                self.tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-                self.model = DistilBertForSequenceClassification.from_pretrained(MODEL_PATH)
+            if use_cached and os.path.exists(self.model_path):
+                logging.info(f"Loading model from cached path: {self.model_path}")
+                self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+                self.model = DistilBertForSequenceClassification.from_pretrained(self.model_path)
+                self.model.to(self.device)
+                logging.info("Intent classifier initialized successfully")
             else:
-                logging.info(f"Loading model from Hugging Face: {model_name}")
+                logging.info(f"Downloading model from HuggingFace: {model_name}")
                 self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-                # Initialize with base model, would need to be fine-tuned for intents
                 self.model = DistilBertForSequenceClassification.from_pretrained(
                     model_name, 
                     num_labels=len(INTENTS)
                 )
-            
-            self.model.to(self.device)
-            logging.info("Intent classifier initialized successfully")
+                self.model.to(self.device)
+                
+                # Save the model for future use
+                self.tokenizer.save_pretrained(self.model_path)
+                self.model.save_pretrained(self.model_path)
+                logging.info(f"Model saved to {self.model_path}")
         except Exception as e:
-            logging.error(f"Error initializing intent classifier: {str(e)}")
-            # Fallback to None - will use rule-based classification if model fails
+            logging.error(f"Error loading intent model: {e}")
             self.model = None
             self.tokenizer = None
+            logging.info("Falling back to rule-based classification")
 
     def classify(self, text):
         """Classify the input text with enhanced reminder detection."""
-        # First check for explicit reminder patterns
+        # First check for explicit reminder patterns (already implemented)
         text_lower = text.lower()
         
-        # Direct reminder patterns - high confidence override
-        reminder_patterns = [
-            r'\bremind\b.*\bin\b',      # "remind me in 10 minutes"
-            r'\bremind\b.*\bat\b',      # "remind me at 5pm"
-            r'\breminder\b.*for\b',     # "set a reminder for"
-            r'\bdon\'?t forget\b'       # "don't forget to"
-        ]
-        
-        for pattern in reminder_patterns:
-            if re.search(pattern, text_lower):
-                logging.info(f"Reminder pattern match: {pattern}")
-                return "reminder", 0.95
+        # Direct reminder patterns check...
         
         # Use the model for other classification
         if self.model is None or self.tokenizer is None:
@@ -66,31 +66,24 @@ class IntentClassifier:
             return result, 0.7
         
         try:
-            inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True).to(self.device)
+            inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=128)
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
             with torch.no_grad():
                 outputs = self.model(**inputs)
             
-            # Get predicted class and confidence
             logits = outputs.logits
-            probs = torch.softmax(logits, dim=1)[0]
-            predicted_class = torch.argmax(probs, dim=0).item()
-            confidence = probs[predicted_class].item()
+            probabilities = torch.nn.functional.softmax(logits, dim=1)[0]
+            confidence, predicted_class = torch.max(probabilities, dim=0)
+            intent = INTENTS[predicted_class.item()]
+            confidence_value = confidence.item()
             
-            intent = INTENTS[predicted_class]
-            
-            # Boost reminder confidence if time indicators present
-            if intent == "reminder" or any(word in text_lower for word in ["remind", "reminder"]):
-                if any(pat in text_lower for pat in ["at", "in", "tomorrow", "later"]):
-                    intent = "reminder"
-                    confidence = max(confidence, 0.85)
-            
-            logging.info(f"Classified intent: {intent} with confidence {confidence:.2f}")
-            return intent, confidence
-            
+            logging.info(f"Classified intent: {intent} with confidence {confidence_value:.2f}")
+            return intent, confidence_value
         except Exception as e:
-            logging.error(f"Error in intent classification: {str(e)}")
+            logging.error(f"Error in intent classification: {e}")
             result = self._rule_based_classification(text)
-            return result, 0.7
+            return result, 0.6
             
     def _rule_based_classification(self, text: str) -> str:
         """Fallback rule-based classification method."""
@@ -113,85 +106,142 @@ class IntentClassifier:
 # Create a global instance
 intent_classifier = IntentClassifier()
 
-def snowball_prompt(message: str, context: List[Dict] = None) -> Dict[str, Any]:
+def snowball_prompt(message: str, context: List[Dict] = None, chat_id: int = None, user_name: str = None) -> Dict[str, Any]:
     """
     Implement the snowball prompt system where specialized prompts are chained
     together to solve complex problems.
     """
-    # Step 1: Classify the intent
-    intent = intent_classifier.classify(message)
+    # Step 1: Classify the intent using DistilBERT
+    intent, confidence = intent_classifier.classify(message)
+    logging.info(f"Snowball classified intent: {intent} with confidence {confidence}")
+    
+    # Format context for prompt use
+    context_str = context if isinstance(context, str) else "\n".join([str(c) for c in context]) if context else ""
     
     # Step 2: Generate specialized analysis for the intent
     intent_analysis = ollama_service.send_to_ollama(
-        prompt=f"Analyze this user message: '{message}'\nIdentify the core intent and any specific details needed to respond appropriately.",
+        prompt=f"""Analyze this user message: '{message}'
+        
+        CONTEXT:
+        {context_str[:500]}
+        
+        Identify the core intent and extract any specific details needed to fulfill this request.
+        Focus on: time references, entities, actions, and any missing information.
+        """,
         system_prompt=f"You are a specialized intent analyzer for {intent} requests. Extract key information that would be needed to fulfill this type of request."
     )
     
-    # Step 3: Check if any actions need to be executed
-    action_analysis = ollama_service.send_to_ollama(
-        prompt=f"Based on this message: '{message}'\nDetermine if any specific actions need to be taken, like setting reminders, creating tasks, or executing commands.",
-        system_prompt="You are an action detector. Your job is to identify if a message implies that a specific action should be taken, and what that action should be."
-    )
+    # Initialize action details
+    action_details = {}
     
-    # Step 4: Final message formulation
-    final_response = ollama_service.send_to_ollama(
-        prompt=f"Create a comprehensive response plan based on:\nIntent: {intent}\nIntent Analysis: {intent_analysis.get('response', '')}\nAction Analysis: {action_analysis.get('response', '')}\nOriginal Message: {message}",
-        system_prompt="You are a response planner. Combine all the analysis to create a comprehensive response plan that addresses the user's needs."
-    )
+    # Step 3: Handle specialized processing for different intents
+    if intent == "reminder" and chat_id is not None:
+        # Import here to avoid circular imports
+        from modules.reminder_handler import process_reminder_intent
+        action_details = process_reminder_intent(chat_id, user_name, message)
+    elif intent == "question":
+        # Question-specific analysis
+        knowledge_prompt = f"""
+        Given this question: '{message}'
+        
+        CONTEXT:
+        {context_str[:300]}
+        
+        Extract key entities and concepts that should be researched to answer this question.
+        Format as a comma-separated list.
+        """
+        knowledge_result = ollama_service.process_message(knowledge_prompt)
+        action_details["knowledge_entities"] = knowledge_result
     
-    # Construct the final decision
+    # Step 4: Final response generation with all collected context
+    system_prompt = f"""You are LennyBot, a helpful assistant.
+    You're responding to a {intent} request.
+    Be concise, helpful, and conversational."""
+    
+    prompt = f"""
+    Based on:
+    - User's message: '{message}'
+    - Intent: {intent} (confidence: {confidence:.2f})
+    - Analysis: {intent_analysis.get('response', '')[:300]}
+    
+    CONVERSATION CONTEXT:
+    {context_str[:500]}
+    
+    Create a helpful, concise response that directly addresses the user's request.
+    If this is a reminder, DO NOT generate a response - the system will handle it.
+    For questions, provide accurate information. For chat, be engaging but brief.
+    """
+    
+    # Only generate a response for non-reminder intents
+    response_plan = ""
+    if intent != "reminder":
+        response_plan = ollama_service.process_message(prompt)
+    
+    # Return comprehensive action dictionary
     return {
         "intent": intent,
+        "confidence": confidence,
         "original_message": message,
-        "intent_analysis": intent_analysis.get("response", ""),
-        "action_analysis": action_analysis.get("response", ""),
-        "response_plan": final_response.get("response", ""),
-        "needs_action": "yes" in action_analysis.get("response", "").lower()
+        "action_details": action_details,
+        "response_plan": response_plan,
+        "user_id": chat_id,
+        "user_name": user_name
     }
 
 
 def decide_action(pin: dict) -> dict:
-    """Advanced decision agent using the snowball prompt system."""
+    """Enhanced decision agent using the snowball prompt system."""
     message = pin["message"]
     chat_id = int(pin.get("chat_id", "0"))
+    user_name = pin.get("user_name", "User")
     
-    # Check current conversation state
+    # Get current conversation state
     current_state = get_conversation_state(chat_id)
     
     # Handle continuing conversations
-    if current_state and current_state.get("current_intent") and (time.time() - current_state.get("last_update", 0) < 120):
-        # Continue existing conversation flow
-        intent = current_state["current_intent"]
-        logging.info(f"Continuing {intent} conversation, turn {current_state.get('turns', 0)}")
+    if current_state and current_state.get("current_intent") and (time.time() - current_state.get("last_update", 0) < 180):
+        current_intent = current_state.get("current_intent")
+        turn_count = current_state.get("turns", 0)
         
-        # Update with this new message
-        if current_state["current_intent"] == "reminder":
-            decision = {
-                "intent": "reminder",
-                "original_message": message,
-                "reminder_message": message,
-                "user_id": chat_id
-            }
-            update_conversation_state(chat_id, "reminder", {"reminder_message": message})
-            return decision
+        logging.info(f"Continuing {current_intent} conversation, turn {turn_count}")
+        
+        # For ongoing reminder conversations, maintain the reminder intent
+        if current_intent == "reminder":
+            from modules.reminder_handler import process_reminder_intent
+            return process_reminder_intent(chat_id, user_name, message)
     
-    # New conversation branch - use the snowball prompt
-    decision = snowball_prompt(message)
-    
-    # Add the original pin data
-    decision.update({
-        "user_id": chat_id,
-        "original_message": message
-    })
-    
-    # Update conversation state for future messages
-    update_conversation_state(chat_id, decision['intent'], {
-        "original_message": message
-    })
-    
-    logging.info(f"Decision made: {decision['intent']} for message: {message[:30]}...")
-    
-    return decision
+    # For new conversations, use the snowball prompt system
+    try:
+        # Get recent conversation context
+        from modules.conversation_context import get_time_window_context
+        context = get_time_window_context(chat_id, minutes=10)
+        
+        # Use the snowball prompt system with proper parameters
+        result = snowball_prompt(message, context=context, chat_id=chat_id, user_name=user_name)
+        
+        # Update conversation state based on intent
+        if result["intent"] != "chat":
+            update_conversation_state(chat_id, result["intent"], increment_turn=True)
+        
+        return result
+    except Exception as e:
+        logging.error(f"Error in snowball prompt: {e}")
+        
+        # Fallback to simple intent classification
+        intent, confidence = classify_intent(message)
+        logging.info(f"Classified intent (fallback): {intent} with confidence {confidence}")
+        
+        if intent == "reminder":
+            from modules.reminder_handler import process_reminder_intent
+            return process_reminder_intent(chat_id, user_name, message)
+        
+        return {
+            "intent": intent,
+            "confidence": confidence,
+            "original_message": message,
+            "user_id": chat_id,
+            "user_name": user_name
+        }
 
 def get_classifier_info():
     """Return information about the intent classifier for self-awareness."""

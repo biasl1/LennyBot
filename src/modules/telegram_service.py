@@ -8,6 +8,7 @@ from telegram.ext import Application, ApplicationBuilder, CommandHandler, Messag
 from modules.reminder_scheduler import ReminderScheduler
 import time
 from modules.conversation_context import get_time_window_context, get_recent_context
+from modules.knowledge_store import KnowledgeStore
 
 
 # Setup paths and imports
@@ -123,6 +124,117 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_text(status_text, parse_mode="Markdown")
 
+# Make sure this function is properly implemented
+async def knowledge_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /knowledge command."""
+    chat_id = update.effective_chat.id
+    user_name = update.effective_user.first_name
+    message = update.message.text.replace('/knowledge', '', 1).strip()
+    
+    # Initialize knowledge store
+    from modules.knowledge_store import KnowledgeStore
+    knowledge_store = KnowledgeStore()
+    
+    if message.startswith("add "):
+        # Format: /knowledge add [optional:topic] Your knowledge text
+        content = message[4:].strip()
+        
+        # Check if a topic is specified
+        parts = content.split(" ", 1)
+        if len(parts) > 1 and len(parts[0]) < 20:
+            topic = parts[0]
+            knowledge_text = parts[1]
+            
+            knowledge_id = knowledge_store.store_knowledge(
+                knowledge_text, 
+                topic=topic,
+                chat_id=chat_id
+            )
+            
+            if knowledge_id:
+                await update.message.reply_text(f"✅ Knowledge added to topic '{topic}'")
+            else:
+                await update.message.reply_text("❌ Failed to store knowledge")
+        else:
+            # No topic specified
+            knowledge_id = knowledge_store.store_knowledge(
+                content,
+                chat_id=chat_id
+            )
+            
+            if knowledge_id:
+                await update.message.reply_text("✅ Knowledge added")
+            else:
+                await update.message.reply_text("❌ Failed to store knowledge")
+                
+    elif message.startswith("search "):
+        # Format: /knowledge search Your search query
+        query = message[7:].strip()
+        
+        if not query:
+            await update.message.reply_text("Please specify what to search for")
+            return
+            
+        results = knowledge_store.search_knowledge(query, limit=3)
+        
+        if results:
+            response = f"🔍 Results for '{query}':\n\n"
+            for i, result in enumerate(results):
+                response += f"{i+1}. {result['content']}\n"
+                response += f"   Topic: {result['topic']}\n"
+                response += f"   Relevance: {result['relevance']:.2f}\n\n"
+            
+            await update.message.reply_text(response)
+        else:
+            await update.message.reply_text(f"No knowledge found for '{query}'")
+            
+    elif message.startswith("topics"):
+        # List available topics
+        topics = knowledge_store.get_topics()
+        
+        if topics:
+            response = "📚 Available topics:\n\n"
+            for topic in topics:
+                response += f"• {topic['name']} ({topic['count']} entries)\n"
+                
+            await update.message.reply_text(response)
+        else:
+            await update.message.reply_text("No topics found in the knowledge base yet")
+            
+    else:
+        # Help message
+        help_text = """
+📚 **Knowledge Management Commands**:
+
+• /knowledge add [topic] Your knowledge text
+  Adds knowledge to a specific topic
+
+• /knowledge add Your knowledge text
+  Adds knowledge with automatic topic detection
+  
+• /knowledge search Your query
+  Searches the knowledge base for information
+  
+• /knowledge topics
+  Lists available knowledge topics
+"""
+        await update.message.reply_text(help_text, parse_mode="Markdown")
+
+        
+
+# Add to init_handlers function
+def init_handlers(application):
+    # Existing handlers
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CommandHandler("context", context_command))
+    application.add_handler(CommandHandler("status", status_command))
+    
+    # Add knowledge command
+    application.add_handler(CommandHandler("knowledge", knowledge_command))
+
+# Add to setup_telegram_bot function
 def setup_telegram_bot():
     """Initialize and configure the Telegram bot."""
     global application

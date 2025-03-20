@@ -229,3 +229,33 @@ def get_time_window_context(chat_id, minutes=10):
     except Exception as e:
         logging.error(f"Error retrieving time window context: {e}")
         return "Error retrieving context."
+
+def enhance_with_knowledge(text, chat_id=None):
+    """Enhance a message with relevant knowledge when appropriate."""
+    try:
+        # Don't enhance short messages
+        if len(text) < 15:
+            return text
+            
+        # Import here to avoid circular imports
+        from modules.knowledge_store import KnowledgeStore
+        
+        # Get knowledge store
+        knowledge_store = KnowledgeStore()
+        
+        # Search for relevant knowledge
+        results = knowledge_store.search_knowledge(text, limit=1)
+        
+        # Only enhance if we have a good match
+        if results and len(results) > 0 and results[0]['relevance'] > 0.7:
+            knowledge = results[0]['content']
+            topic = results[0]['topic']
+            
+            # Add knowledge as context
+            enhanced_text = f"{text}\n\nRelevant knowledge: {knowledge} (from topic: {topic})"
+            return enhanced_text
+            
+        return text
+    except Exception as e:
+        logging.error(f"Error enhancing with knowledge: {e}")
+        return text

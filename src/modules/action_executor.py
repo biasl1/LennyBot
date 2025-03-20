@@ -5,17 +5,18 @@ import time
 from telegram import Update
 from telegram.ext import ContextTypes
 from modules import ollama_service
-from modules.conversation_context import get_time_window_context
+from modules.conversation_context import get_time_window_context, enhance_with_knowledge
 from modules.user_interaction import update_conversation_state, get_conversation_state
 from modules.database import get_history_collection, get_reminder_collection
 from modules.time_extractor import extract_time
+# Add missing import
+import uuid
 
 async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action: dict):
     # Get collections from database module
     history_collection = get_history_collection()
     reminder_collection = get_reminder_collection()
     
-
     try:
         # Extract basic information
         intent = action.get("intent", "chat")
@@ -46,134 +47,125 @@ async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, act
         # Send typing indicator
         await context.bot.send_chat_action(chat_id=chat_id, action="typing")
         
-        # Get recent conversation context (last hour)
-        try:
-            recent_context = get_time_window_context(chat_id, minutes=10)
-        except Exception as e:
-            logging.error(f"Error retrieving context: {e}")
-            recent_context = "No recent context available."
-        
         # Get conversation state
         current_state = get_conversation_state(chat_id)
         
-
-        # Replace the reminder handling section
+        # Handle intent-specific actions
         if intent == "reminder":
-            # Extract time using the new module
-            due_time, time_str = extract_time(user_message, timestamp)
-            
-            # Format for display
-            due_dt = datetime.datetime.fromtimestamp(due_time)
-            logging.info(f"Setting reminder for: {time_str} ({due_dt})")
-            
-            # Generate a unique ID
-            reminder_id = f"reminder-{chat_id}-{int(timestamp)}"
-            
-            # Clean reminder message - remove time references
-            clean_message = re.sub(r'remind me|reminder|at \d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?|in \d+ (?:minute|min|hour|hr)s?', '', user_message, flags=re.IGNORECASE)
-            clean_message = clean_message.strip()
-            if len(clean_message) < 3:
-                clean_message = user_message  # Use original if too short
-            
-            # Store reminder
-            reminder_collection.add(
-                documents=[clean_message],
-                metadatas=[{
-                    "chat_id": str(chat_id),
-                    "user_name": user_name,
-                    "created_at": str(timestamp),
-                    "message": clean_message,
-                    "due_at": str(due_time),
-                    "time_str": time_str
-                }],
-                ids=[reminder_id]
-            )
-            
-            # Send confirmation
-            time_phrase = f"at {due_dt.strftime('%I:%M %p')}" if "at" in time_str else time_str
-            confirmation = f"✅ I'll remind you about that {time_phrase}."
-            await update.message.reply_text(confirmation)
-            
-            # Store bot's response
-            try:
-                history_collection.add(
-                    documents=[confirmation],
-                    metadatas=[{
-                        "chat_id": str(chat_id),
-                        "timestamp": str(time.time()),
-                        "is_user": "false"
-                    }],
-                    ids=[f"reply-{unique_id}-conf"]
+            # Check if this is a special reminder request like "list my reminders"
+            if re.search(r'(list|show|view|do i have|any) reminders', user_message.lower()):
+                # Get all active reminders for this user
+                results = reminder_collection.get(
+                    where={"chat_id": str(chat_id), "completed": "false"},
+                    include=["metadatas", "documents"]
                 )
-            except Exception as e:
-                logging.error(f"Error storing confirmation: {e}")
-            
-            return
-            
-        elif "my name" in user_message.lower():
-            # Special handling for name questions
-            response = f"Your name is {user_name}."
-            await update.message.reply_text(response)
-            
-            # Store bot's response
-            try:
-                history_collection.add(
-                    documents=[response],
-                    metadatas=[{
-                        "chat_id": str(chat_id),
-                        "timestamp": str(time.time()),
-                        "is_user": "false"
-                    }],
-                    ids=[f"reply-{unique_id}"]
-                )
-            except Exception as e:
-                logging.error(f"Error storing bot response in history: {e}")
                 
+                # Show active reminders
+                reminder_count = len(results.get('ids', []))
+                if reminder_count > 0:
+                    reminders_text = "Your active reminders:\n\n"
+                    for i, reminder_id in enumerate(results['ids']):
+                        metadata = results['metadatas'][i]
+                        due_time = float(metadata.get('due_at', 0))
+                        due_dt = datetime.datetime.fromtimestamp(due_time)
+                        time_str = metadata.get('time_str', '')
+                        message = results['documents'][i]
+                        
+                        if "at" in time_str:
+                            time_display = f"at {due_dt.strftime('%I:%M %p')}"
+                        else:
+                            time_display = time_str
+                            
+                        reminders_text += f"• {message} - {time_display}\n"
+                    
+                    await update.message.reply_text(reminders_text)
+                else:
+                    await update.message.reply_text("You don't have any active reminders.")
+                
+                # Store bot's response
+                try:
+                    history_collection.add(
+                        documents=[reminders_text if reminder_count > 0 else "You don't have any active reminders."],
+                        metadatas=[{
+                            "chat_id": str(chat_id),
+                            "timestamp": str(time.time()),
+                            "is_user": "false"
+                        }],
+                        ids=[f"reply-{uuid.uuid4()}"]
+                    )
+                except Exception as e:
+                    logging.error(f"Error storing response: {e}")
+                
+                return
+            
+            # Process normal reminder creation
+            from modules.reminder_handler import create_reminder
+            
+            # Get action details from snowball prompt if available
+            action_details = action.get("action_details", {})
+            
+            # Use the appropriate action dictionary
+            reminder_action = action_details if action_details else action
+            
+            # Create the reminder
+            success, message = create_reminder(reminder_action)
+            
+            # Send message to user
+            await update.message.reply_text(message)
+            
+            # Store bot's response in history
+            try:
+                history_collection.add(
+                    documents=[message],
+                    metadatas=[{
+                        "chat_id": str(chat_id),
+                        "timestamp": str(time.time()),
+                        "is_user": "false"
+                    }],
+                    ids=[f"reply-{uuid.uuid4()}"]
+                )
+            except Exception as e:
+                logging.error(f"Error storing response: {e}")
+            
             return
-            
-        elif intent == "question":
-            prompt = f"""
-            You are LennyBot, an AI assistant talking to {user_name}.
-            
-            RECENT CONTEXT (from the last hour):
-            {recent_context}
-            
-            Answer this question briefly: '{user_message}'
-            Keep your answer under 40 words.
-            Never say you are OpenAI, ChatGPT, or any other AI. You are LennyBot.
-            """
-            
-        else:  # chat or default
-            prompt = f"""
-            You are LennyBot, an AI assistant talking to {user_name}.
-            
-            RECENT CONTEXT (from the last hour):
-            {recent_context}
-            
-            Reply briefly to: '{user_message}'
-            Keep your reply under 30 words.
-            Never say you are OpenAI, ChatGPT, or any other AI. You are LennyBot.
-            """
         
-        # Build an enhanced prompt with self-awareness
-        prompt = f"""You are LennyBot, a friendly and helpful Telegram assistant.
+        # For other intents, use the response plan from snowball if available
+        response_plan = action.get("response_plan")
+        
+        if response_plan and len(response_plan.strip()) > 0:
+            # Use the pre-generated response from snowball
+            response = response_plan
+        else:
+            # Fallback to traditional method
+            # Get recent conversation context
+            try:
+                recent_context = get_time_window_context(chat_id, minutes=10)
+            except Exception as e:
+                logging.error(f"Error retrieving context: {e}")
+                recent_context = "No recent context available."
+            
+            # Build an enhanced prompt with self-awareness and knowledge
+            prompt = f"""You are LennyBot, a friendly and helpful Telegram assistant.
 
 CONVERSATION CONTEXT:
 {recent_context}
 
 SYSTEM AWARENESS:
 - Current intent: {action['intent']}
-- Conversation turns: {current_state.get('turns', 1)}
+- Conversation turns: {current_state.get('turns', 1) if current_state else 1}
 - Confidence level: {action.get('confidence', 'unknown')}
 
 USER MESSAGE: {action['original_message']}
 
 Based on this context and system state, provide a helpful response. If the conversation has multiple turns, ensure continuity.
 """
-        
-        # Get response with safeguards
-        response = ollama_service.process_message(prompt)
             
+            # Enhance with knowledge
+            prompt = enhance_with_knowledge(prompt, chat_id)
+            
+            # Get response with safeguards
+            response = ollama_service.process_message(prompt)
+        
         # Final validation - ensure we have text to send
         if not response or len(response.strip()) == 0:
             response = f"I understand. How else can I help you, {user_name}?"

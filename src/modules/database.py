@@ -47,6 +47,31 @@ pin_collection = chroma_client.get_or_create_collection(
     embedding_function=mini_embed
 )
 
+def get_knowledge_collection():
+    """Get or create the knowledge collection."""
+    client = get_client()
+    try:
+        return client.get_or_create_collection(
+            name="knowledge_base",
+            metadata={"hnsw:space": "cosine"}
+        )
+    except Exception as e:
+        logging.error(f"Error getting knowledge collection: {e}")
+        return None
+
+def get_topics_collection():
+    """Get or create the topics collection."""
+    client = get_client()
+    try:
+        return client.get_or_create_collection(
+            name="knowledge_topics",
+            metadata={"hnsw:space": "cosine"}
+        )
+    except Exception as e:
+        logging.error(f"Error getting topics collection: {e}")
+        return None
+    
+    
 # Accessor functions
 def get_history_collection():
     return history_collection
