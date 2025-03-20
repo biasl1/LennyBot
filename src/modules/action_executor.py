@@ -4,7 +4,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from modules import ollama_service
 from modules.conversation_context import get_time_window_context
-from modules.user_interaction import update_conversation_state
+from modules.user_interaction import update_conversation_state, get_conversation_state
 from modules.database import get_history_collection, get_reminder_collection
 
 async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action: dict):
@@ -49,6 +49,9 @@ async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, act
         except Exception as e:
             logging.error(f"Error retrieving context: {e}")
             recent_context = "No recent context available."
+        
+        # Get conversation state
+        current_state = get_conversation_state(chat_id)
         
         # Process based on intent
         if intent == "reminder":
@@ -154,6 +157,22 @@ async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, act
             Keep your reply under 30 words.
             Never say you are OpenAI, ChatGPT, or any other AI. You are LennyBot.
             """
+        
+        # Build an enhanced prompt with self-awareness
+        prompt = f"""You are LennyBot, a friendly and helpful Telegram assistant.
+
+CONVERSATION CONTEXT:
+{recent_context}
+
+SYSTEM AWARENESS:
+- Current intent: {action['intent']}
+- Conversation turns: {current_state.get('turns', 1)}
+- Confidence level: {action.get('confidence', 'unknown')}
+
+USER MESSAGE: {action['original_message']}
+
+Based on this context and system state, provide a helpful response. If the conversation has multiple turns, ensure continuity.
+"""
         
         # Get response with safeguards
         response = ollama_service.process_message(prompt)

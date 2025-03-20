@@ -88,6 +88,41 @@ async def context_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(response, parse_mode="Markdown")
 
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Display the current bot status and metrics."""
+    chat_id = update.message.chat_id
+    
+    # Gather system metrics
+    from modules.user_interaction import get_conversation_state, active_conversations
+    
+    status_text = "🤖 *LennyBot Status Report*\n\n"
+    
+    # System info
+    status_text += "*System:*\n"
+    status_text += f"- Uptime: {(time.time() - application.bot_data.get('start_time', time.time()))/60:.1f} minutes\n"
+    status_text += f"- Active conversations: {len(active_conversations)}\n"
+    
+    # User context
+    status_text += "\n*Your Context:*\n"
+    state = get_conversation_state(chat_id)
+    if state:
+        status_text += f"- Current intent: {state.get('current_intent', 'none')}\n"
+        status_text += f"- Conversation turns: {state.get('turns', 0)}\n"
+        ago = time.time() - state.get('last_update', time.time())
+        status_text += f"- Last update: {ago:.1f} seconds ago\n"
+    else:
+        status_text += "- No active conversation\n"
+    
+    # Intent classifier details 
+    status_text += "\n*Intent Classification:*\n"
+    from modules.decision_agent import get_classifier_info
+    model_info = get_classifier_info()
+    status_text += f"- Model: {model_info.get('model_name', 'unknown')}\n"
+    status_text += f"- Intents: {', '.join(model_info.get('intents', []))}\n"
+    status_text += f"- Confidence threshold: {model_info.get('threshold', 0.5)}\n"
+        
+    await update.message.reply_text(status_text, parse_mode="Markdown")
+
 def setup_telegram_bot():
     """Initialize and configure the Telegram bot."""
     global application
@@ -111,8 +146,10 @@ def setup_telegram_bot():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CommandHandler("context", context_command))
+    application.add_handler(CommandHandler("status", status_command))
 
     return application
+
 
 def start_telegram_bot():
     """Start the Telegram bot."""

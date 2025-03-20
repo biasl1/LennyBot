@@ -168,3 +168,12 @@ def decide_action(pin: dict) -> dict:
     logging.info(f"Decision made: {decision['intent']} for message: {message[:30]}...")
     
     return decision
+
+def get_classifier_info():
+    """Return information about the intent classifier for self-awareness."""
+    return {
+        "model_name": "distilbert-base-uncased fine-tuned",
+        "intents": ["chat", "question", "search", "reminder", "action"],
+        "threshold": 0.35,  # Current confidence threshold
+        "loaded": hasattr(get_classifier_info, "model") and get_classifier_info.model is not None
+    }

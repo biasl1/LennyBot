@@ -1,3 +1,4 @@
+import datetime
 import os
 import re
 import logging
@@ -208,8 +209,23 @@ def get_time_window_context(chat_id, minutes=10):
             elif item['type'] == 'reminder':
                 conversation_text += f"[System] Reminder set: {item['text']}\n"
                 
-        return conversation_text
+        conversation_text += "\n--- System Status ---\n"
+        conversation_text += f"Time window: {minutes} minutes\n"
+        conversation_text += f"Current time: {datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')}\n"
+        conversation_text += f"Context items: {len(context_items)}\n"
         
+        # Add current conversation state if available
+        try:
+            from modules.user_interaction import get_conversation_state
+            state = get_conversation_state(chat_id)
+            if state:
+                conversation_text += f"Current intent: {state.get('current_intent', 'none')}\n"
+                conversation_text += f"Conversation turns: {state.get('turns', 0)}\n"
+                conversation_text += f"Last update: {datetime.datetime.fromtimestamp(state.get('last_update', 0)).strftime('%H:%M:%S')}\n"
+        except ImportError:
+            pass
+            
+        return conversation_text        
     except Exception as e:
         logging.error(f"Error retrieving time window context: {e}")
         return "Error retrieving context."

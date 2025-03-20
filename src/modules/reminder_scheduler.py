@@ -116,9 +116,11 @@ class ReminderScheduler:
                     current_state = get_conversation_state(chat_id)
                     
                     # Check for incomplete conversations that need proactive follow-up
+                    follow_up_count = current_state.get("follow_up_count", 0)
                     if (current_state.get("current_intent") in ["reminder", "action"] and 
                         current_state.get("turns", 0) == 1 and
-                        current_time - current_state.get("last_update", 0) > 60):
+                         current_time - current_state.get("last_update", 0) > 60 and
+                        follow_up_count < 2):  # Maximum of 2 follow-ups
                         
                         # It's been a minute since the user requested a reminder or action
                         # but they haven't provided details - prompt them
@@ -137,23 +139,35 @@ class ReminderScheduler:
                         
                         response = process_message(prompt)
                         
-                        if response:
-                            try:
-                                await self.bot.send_message(chat_id=chat_id, text=response)
-                                logging.info(f"Sent proactive follow-up for {current_state.get('current_intent')} to {chat_id}")
-                                
-                                # Store bot's proactive response
-                                history_collection.add(
-                                    documents=[response],
-                                    metadatas=[{
-                                        "chat_id": chat_id_str,
-                                        "timestamp": str(time.time()),
-                                        "is_user": "false"
-                                    }],
-                                    ids=[f"proactive-{time.time()}"]
-                                )
-                            except Exception as e:
-                                logging.error(f"Error sending proactive message: {e}")
+
+                    if response:
+                        try:
+                            await self.bot.send_message(chat_id=chat_id, text=response)
+                            logging.info(f"Sent proactive follow-up for {current_state.get('current_intent')} to {chat_id}")
+                            
+                            # Store bot's proactive response
+                            history_collection.add(
+                                documents=[response],
+                                metadatas=[{
+                                    "chat_id": chat_id_str,
+                                    "timestamp": str(time.time()),
+                                    "is_user": "false"
+                                }],
+                                ids=[f"proactive-{time.time()}"]
+                            )
+                            
+                            # ADD THE NEW CODE RIGHT HERE - after storing the bot's response:
+                            from modules.user_interaction import update_conversation_state
+                            # Update to increment the follow-up count
+                            current_state["follow_up_count"] = follow_up_count + 1
+                            update_conversation_state(
+                                chat_id, 
+                                current_state.get("current_intent"),
+                                current_state
+                            )
+                            
+                        except Exception as e:
+                            logging.error(f"Error sending proactive message: {e}")
                     
             except Exception as e:
                 logging.error(f"Error in conversation analysis: {e}")
