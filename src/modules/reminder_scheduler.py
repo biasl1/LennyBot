@@ -2,10 +2,10 @@ import asyncio
 import logging
 import time
 from telegram import Bot
-from modules.user_interaction import get_conversation_state
 from modules.conversation_context import get_time_window_context
 from modules.database import get_reminder_collection, get_history_collection
 from modules.ollama_service import process_message
+from modules.user_interaction import get_conversation_state, update_conversation_state
 
 class ReminderScheduler:
     def __init__(self, bot: Bot):
@@ -40,90 +40,102 @@ class ReminderScheduler:
     
 
     async def _process_due_reminders(self):
-        """Check for and send due reminders, then analyze conversation context."""
+        """Check for and send due reminders."""
         current_time = time.time()
         logging.info(f"Checking for due reminders at {current_time}")
         
-        # Get collections from database module
-        reminder_collection = get_reminder_collection()
-        history_collection = get_history_collection()
-        # --- PART 1: PROCESS REMINDERS (Keep existing code) ---
         try:
             # Get the collection
             reminder_collection = get_reminder_collection()
             all_reminders = reminder_collection.get()
-        
-            all_reminders = reminder_collection.get()
             
-            if not all_reminders or not all_reminders['ids']:
-                logging.info("No reminders found")
-            else:
-                logging.info(f"Found {len(all_reminders['ids'])} reminders to check")
-                
+            # Debug log total reminders
+            reminder_count = len(all_reminders['ids']) if all_reminders else 0
+            logging.info(f"Found {reminder_count} total reminders")
+            
+            # Process due reminders
+            if all_reminders and len(all_reminders['ids']) > 0:
                 for i, reminder_id in enumerate(all_reminders['ids']):
                     metadata = all_reminders['metadatas'][i]
-                    message = all_reminders['documents'][i]
+                    reminder_text = all_reminders['documents'][i]
                     
-                    # Process due reminders (same as before)
-                    if 'created_at' in metadata and 'chat_id' in metadata:
-                        created_time = float(metadata['created_at'])
-                        chat_id = metadata['chat_id']
-                        
-                        time_diff = current_time - created_time
-                        logging.info(f"Reminder {reminder_id} age: {time_diff:.1f} seconds")
-                        
-                        if time_diff >= 60:  # 60 seconds = 1 minute
-                            try:
-                                logging.info(f"Sending reminder {reminder_id} to {chat_id}")
+                    # Log each reminder being checked
+                    due_str = metadata.get('due_at', 'unknown')
+                    chat_id_str = metadata.get('chat_id', 'unknown')
+                    logging.debug(f"Checking reminder {reminder_id} for {chat_id_str}, due at {due_str}")
+                    
+                    # Check if this reminder is due
+                    if 'due_at' in metadata:
+                        try:
+                            due_time = float(metadata['due_at'])
+                            chat_id = int(metadata['chat_id'])
+                            
+                            # Log time until due for debugging
+                            seconds_until = due_time - current_time
+                            if seconds_until > 0:
+                                logging.debug(f"Reminder {reminder_id} due in {seconds_until:.1f} seconds")
+                            
+                            # If reminder is due
+                            if current_time >= due_time:
+                                logging.info(f"⏰ REMINDER DUE! {reminder_id} for {chat_id}")
+                                
+                                # Send reminder with poem if requested
+                                if "poem" in reminder_text.lower():
+                                    prompt = f"Write a short, fun poem about: {reminder_text}. Keep it under 6 lines."
+                                    poem = process_message(prompt)
+                                    reminder_message = f"🔔 *REMINDER* 📝\n\n{poem}"
+                                else:
+                                    reminder_message = f"🔔 *REMINDER*\n\n{reminder_text}"
+                                
                                 await self.bot.send_message(
-                                    chat_id=int(chat_id),
-                                    text=f"⏰ Reminder: {message}"
+                                    chat_id=chat_id,
+                                    text=reminder_message,
+                                    parse_mode="Markdown"
                                 )
-                                logging.info(f"Sent reminder {reminder_id} to {chat_id}")
+                                logging.info(f"Sent reminder to {chat_id}: {reminder_text[:30]}...")
                                 
+                                # Delete the reminder
                                 reminder_collection.delete(ids=[reminder_id])
-                                logging.info(f"Deleted reminder {reminder_id}")
-                                
-                            except Exception as e:
-                                logging.error(f"Error sending reminder {reminder_id}: {e}")
-        
-            # --- PART 2: NEW - ANALYZE ACTIVE CONVERSATIONS (Every 30 seconds) ---
-            try:
-                # Get all unique chat_ids from history collection
-                active_chats = set()
-                recents = history_collection.get()
+                                logging.info(f"Deleted reminder: {reminder_id}")
+                        except Exception as e:
+                            logging.error(f"Error processing reminder {reminder_id}: {e}")
+            else:
+                logging.info("No reminders found")
                 
-                if recents and recents['metadatas']:
-                    for metadata in recents['metadatas']:
+            # Continue with conversation analysis...
+
+            # Analyze active conversations
+            history_collection = get_history_collection()
+            active_chats = set()
+            
+            try:
+                # Get all unique chat_ids
+                all_history = history_collection.get()
+                
+                if all_history and len(all_history['ids']) > 0:
+                    for metadata in all_history['metadatas']:
                         if 'chat_id' in metadata:
-                            try:
-                                chat_id = metadata['chat_id']
-                                # Only consider recent activity (last 10 minutes)
-                                if 'timestamp' in metadata:
-                                    ts = float(metadata['timestamp'])
-                                    if current_time - ts < 600:  # 10 minutes
-                                        active_chats.add(chat_id)
-                            except Exception:
-                                pass
+                            active_chats.add(metadata['chat_id'])
                 
                 # For each active chat, check if we need to intervene
                 for chat_id_str in active_chats:
                     try:
                         chat_id = int(chat_id_str)
                     except ValueError:
-                        continue  # Skip this chat_id and proceed to the next one
+                        logging.warning(f"Skipping invalid chat_id: {chat_id_str}")
+                        continue
                     
                     current_state = get_conversation_state(chat_id)
+                    response = None  # Initialize response variable
                     
                     # Check for incomplete conversations that need proactive follow-up
                     follow_up_count = current_state.get("follow_up_count", 0)
                     if (current_state.get("current_intent") in ["reminder", "action"] and 
                         current_state.get("turns", 0) == 1 and
-                         current_time - current_state.get("last_update", 0) > 60 and
+                        current_time - current_state.get("last_update", 0) > 60 and
                         follow_up_count < 2):  # Maximum of 2 follow-ups
                         
-                        # It's been a minute since the user requested a reminder or action
-                        # but they haven't provided details - prompt them
+                        # Generate follow-up prompt
                         time_window = get_time_window_context(chat_id, minutes=10)
                         
                         prompt = f"""
@@ -138,37 +150,33 @@ class ReminderScheduler:
                         """
                         
                         response = process_message(prompt)
-                        
-
-                    if response:
-                        try:
-                            await self.bot.send_message(chat_id=chat_id, text=response)
-                            logging.info(f"Sent proactive follow-up for {current_state.get('current_intent')} to {chat_id}")
-                            
-                            # Store bot's proactive response
-                            history_collection.add(
-                                documents=[response],
-                                metadatas=[{
-                                    "chat_id": chat_id_str,
-                                    "timestamp": str(time.time()),
-                                    "is_user": "false"
-                                }],
-                                ids=[f"proactive-{time.time()}"]
-                            )
-                            
-                            # ADD THE NEW CODE RIGHT HERE - after storing the bot's response:
-                            from modules.user_interaction import update_conversation_state
-                            # Update to increment the follow-up count
-                            current_state["follow_up_count"] = follow_up_count + 1
-                            update_conversation_state(
-                                chat_id, 
-                                current_state.get("current_intent"),
-                                current_state
-                            )
-                            
-                        except Exception as e:
-                            logging.error(f"Error sending proactive message: {e}")
                     
+                        if response:
+                            try:
+                                await self.bot.send_message(chat_id=chat_id, text=response)
+                                logging.info(f"Sent proactive follow-up for {current_state.get('current_intent')} to {chat_id}")
+                                
+                                # Store bot's proactive response
+                                history_collection.add(
+                                    documents=[response],
+                                    metadatas=[{
+                                        "chat_id": chat_id_str,
+                                        "timestamp": str(time.time()),
+                                        "is_user": "false"
+                                    }],
+                                    ids=[f"proactive-{time.time()}"]
+                                )
+                                
+                                # Update to increment the follow-up count
+                                current_state["follow_up_count"] = follow_up_count + 1
+                                update_conversation_state(
+                                    chat_id, 
+                                    current_state.get("current_intent"),
+                                    current_state
+                                )
+                            except Exception as e:
+                                logging.error(f"Error sending proactive message: {e}")
+            
             except Exception as e:
                 logging.error(f"Error in conversation analysis: {e}")
                 

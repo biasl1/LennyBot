@@ -1,3 +1,5 @@
+import re
+import datetime
 import logging
 import time
 from telegram import Update
@@ -6,6 +8,7 @@ from modules import ollama_service
 from modules.conversation_context import get_time_window_context
 from modules.user_interaction import update_conversation_state, get_conversation_state
 from modules.database import get_history_collection, get_reminder_collection
+from modules.time_extractor import extract_time
 
 async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action: dict):
     # Get collections from database module
@@ -53,63 +56,57 @@ async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, act
         # Get conversation state
         current_state = get_conversation_state(chat_id)
         
-        # Process based on intent
+
+        # Replace the reminder handling section
         if intent == "reminder":
-            reminder_message = action.get("reminder_message", user_message)
+            # Extract time using the new module
+            due_time, time_str = extract_time(user_message, timestamp)
             
-            # Store reminder in ChromaDB with safe metadata
-            unique_reminder_id = f"reminder-{chat_id}-{int(timestamp)}-{hash(reminder_message) % 10000}"
-            reminder_data = {
-                "chat_id": str(chat_id),
-                "user_name": user_name,
-                "created_at": str(timestamp),
-                "message": reminder_message
-            }
+            # Format for display
+            due_dt = datetime.datetime.fromtimestamp(due_time)
+            logging.info(f"Setting reminder for: {time_str} ({due_dt})")
             
-            # Store in ChromaDB
-            try:
-                reminder_collection.add(
-                    documents=[reminder_message],
-                    metadatas=[reminder_data],
-                    ids=[unique_reminder_id]
-                )
-                logging.info(f"Stored reminder: {unique_reminder_id}")
-            except Exception as e:
-                logging.error(f"Error storing reminder: {e}")
+            # Generate a unique ID
+            reminder_id = f"reminder-{chat_id}-{int(timestamp)}"
             
-            prompt = f"""
-            You are LennyBot, an AI assistant.
+            # Clean reminder message - remove time references
+            clean_message = re.sub(r'remind me|reminder|at \d{1,2}(?::\d{2})?(?:\s*(?:am|pm))?|in \d+ (?:minute|min|hour|hr)s?', '', user_message, flags=re.IGNORECASE)
+            clean_message = clean_message.strip()
+            if len(clean_message) < 3:
+                clean_message = user_message  # Use original if too short
             
-            RECENT CONTEXT:
-            {recent_context}
+            # Store reminder
+            reminder_collection.add(
+                documents=[clean_message],
+                metadatas=[{
+                    "chat_id": str(chat_id),
+                    "user_name": user_name,
+                    "created_at": str(timestamp),
+                    "message": clean_message,
+                    "due_at": str(due_time),
+                    "time_str": time_str
+                }],
+                ids=[reminder_id]
+            )
             
-            The user {user_name} has asked you to remind them about: '{reminder_message}'. 
-            Confirm that you will remind them in a friendly way.
-            Keep your response under 30 words.
-            """
+            # Send confirmation
+            time_phrase = f"at {due_dt.strftime('%I:%M %p')}" if "at" in time_str else time_str
+            confirmation = f"✅ I'll remind you about that {time_phrase}."
+            await update.message.reply_text(confirmation)
             
-        elif "what did we talk about" in user_message.lower() or "chat history" in user_message.lower():
-            # Specific response for conversation history requests
-            if recent_context and recent_context != "No recent context available.":
-                response = f"Here's what we've been discussing:\n\n{recent_context}"
-            else:
-                response = "We haven't had much conversation recently that I can recall."
-            
-            await update.message.reply_text(response)
-            
-            # Store bot's response in conversation history
+            # Store bot's response
             try:
                 history_collection.add(
-                    documents=[response],
+                    documents=[confirmation],
                     metadatas=[{
                         "chat_id": str(chat_id),
                         "timestamp": str(time.time()),
                         "is_user": "false"
                     }],
-                    ids=[f"reply-{unique_id}"]
+                    ids=[f"reply-{unique_id}-conf"]
                 )
             except Exception as e:
-                logging.error(f"Error storing bot response in history: {e}")
+                logging.error(f"Error storing confirmation: {e}")
             
             return
             

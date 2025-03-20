@@ -22,7 +22,7 @@ def get_conversation_state(chat_id):
     """Get the current conversation state."""
     state = active_conversations.get(chat_id, {})
     # Check if conversation is still active (less than 5 minutes old)
-    if time.time() - state.get("last_update", 0) > 300:
+    if time.time() - state.get("last_update", 0) > 900:
         # Reset expired conversations
         if chat_id in active_conversations:
             del active_conversations[chat_id]

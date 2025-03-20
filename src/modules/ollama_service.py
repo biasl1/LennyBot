@@ -9,7 +9,7 @@ def process_message(message: str, max_retries=2) -> str:
     
     for attempt in range(max_retries):
         try:
-            timeout = 20 + (attempt * 5)  # 20s, then 25s
+            timeout = 60 + (attempt * 5)  # 20s, then 25s
             
             # Format prompt to clearly distinguish context from current message
             formatted_prompt = message

@@ -1,6 +1,7 @@
 import time
 import logging
 import torch
+import re 
 from transformers import AutoTokenizer, DistilBertForSequenceClassification
 from modules import ollama_service
 from typing import Dict, List, Any
@@ -41,32 +42,55 @@ class IntentClassifier:
             self.model = None
             self.tokenizer = None
 
-    def classify(self, text: str) -> str:
-        """Classify the input text into one of the predefined intents."""
+    def classify(self, text):
+        """Classify the input text with enhanced reminder detection."""
+        # First check for explicit reminder patterns
+        text_lower = text.lower()
+        
+        # Direct reminder patterns - high confidence override
+        reminder_patterns = [
+            r'\bremind\b.*\bin\b',      # "remind me in 10 minutes"
+            r'\bremind\b.*\bat\b',      # "remind me at 5pm"
+            r'\breminder\b.*for\b',     # "set a reminder for"
+            r'\bdon\'?t forget\b'       # "don't forget to"
+        ]
+        
+        for pattern in reminder_patterns:
+            if re.search(pattern, text_lower):
+                logging.info(f"Reminder pattern match: {pattern}")
+                return "reminder", 0.95
+        
+        # Use the model for other classification
         if self.model is None or self.tokenizer is None:
-            return self._rule_based_classification(text)
+            result = self._rule_based_classification(text)
+            return result, 0.7
         
         try:
             inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True).to(self.device)
             with torch.no_grad():
                 outputs = self.model(**inputs)
             
-            # Get predicted intent
-            predicted_class = torch.argmax(outputs.logits, dim=1).item()
+            # Get predicted class and confidence
+            logits = outputs.logits
+            probs = torch.softmax(logits, dim=1)[0]
+            predicted_class = torch.argmax(probs, dim=0).item()
+            confidence = probs[predicted_class].item()
+            
             intent = INTENTS[predicted_class]
-            confidence = torch.softmax(outputs.logits, dim=1)[0][predicted_class].item()
+            
+            # Boost reminder confidence if time indicators present
+            if intent == "reminder" or any(word in text_lower for word in ["remind", "reminder"]):
+                if any(pat in text_lower for pat in ["at", "in", "tomorrow", "later"]):
+                    intent = "reminder"
+                    confidence = max(confidence, 0.85)
             
             logging.info(f"Classified intent: {intent} with confidence {confidence:.2f}")
+            return intent, confidence
             
-            # If confidence is low, fall back to rule-based
-            if confidence < 0.35:
-                logging.info(f"Low confidence ({confidence:.2f}), falling back to rule-based")
-                return self._rule_based_classification(text)
-                
-            return intent
         except Exception as e:
             logging.error(f"Error in intent classification: {str(e)}")
-            return self._rule_based_classification(text)
+            result = self._rule_based_classification(text)
+            return result, 0.7
             
     def _rule_based_classification(self, text: str) -> str:
         """Fallback rule-based classification method."""
