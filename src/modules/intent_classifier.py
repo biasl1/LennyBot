@@ -66,7 +66,7 @@ def classify_intent(text: str) -> tuple:
     try:
         # First try rule-based for high-confidence cases
         rule_intent, rule_confidence = rule_based_classification(text)
-        if rule_confidence > 0.9:
+        if rule_confidence > 0.95:
             return rule_intent, rule_confidence
         
         # Otherwise use the model

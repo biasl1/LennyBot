@@ -1,7 +1,10 @@
+# ADD AT THE TOP - BEFORE ANY OTHER CODE
+from typing import Tuple, Dict, List, Any, Optional, Union
+import threading
+import uuid
+import ast
 import logging
 import time
-import threading
-from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 
 from modules.database import get_db_client, get_history_collection
@@ -41,44 +44,31 @@ class MetaContext:
             get_or_create=True
         )
     
+    # Fix the indentation error in log_event method (around line 76-77)
     def log_event(self, source: str, event_type: str, data: Dict[str, Any], id_suffix: str = None):
-        """Log an event to the meta-context repository."""
+        """Log an event to the meta-context repository with unique IDs."""
         try:
-            # Generate a unique ID
             timestamp = data.get("timestamp", time.time())
             
-            # Create base ID
+            # Generate a unique ID with random suffix
+            import uuid
+            random_suffix = uuid.uuid4().hex[:8]
+            event_id = f"{source}-{event_type}-{int(timestamp)}-{random_suffix}"
+            
             if id_suffix:
-                event_id = f"{source}-{event_type}-{id_suffix}"
-            else:
-                event_id = f"{source}-{event_type}-{int(timestamp)}"
+                event_id = f"{event_id}-{id_suffix}"
             
-            # Add random suffix to system events to prevent collisions
-            if source == "system":
-                import random
-                event_id = f"{event_id}-{random.randint(1000, 9999)}"
-                
-            # Extract chat_id if present
-            chat_id = str(data.get("chat_id", "system"))
-            
-            # Format as metadata and document
+            # Add metadata
             metadata = {
                 "source": source,
                 "event_type": event_type,
-                "timestamp": str(timestamp),
-                "chat_id": chat_id
+                "timestamp": str(timestamp)
             }
             
-            # Check if ID already exists
-            try:
-                existing = self.context_collection.get(ids=[event_id])
-                if existing and existing.get('ids') and len(existing['ids']) > 0:
-                    # Add unique suffix to avoid collision
-                    event_id = f"{event_id}-{int(time.time()*1000) % 10000}"
-            except Exception:
-                # If error checking, just proceed with original ID
-                pass
-            
+            # Add chat_id if present in the data
+            if "chat_id" in data:
+                metadata["chat_id"] = str(data["chat_id"])
+                
             # Store in ChromaDB
             self.context_collection.add(
                 ids=[event_id],
@@ -226,9 +216,10 @@ class MetaContext:
                 context_text += "## System Events\n"
                 for event in meta_events[-5:]:  # Latest 5 events
                     metadata = event["metadata"]
+                    document = event["data"]
                     source = metadata.get("source", "unknown")
                     event_type = metadata.get("event_type", "unknown")
-                    context_text += f"• {source}.{event_type} at {datetime.fromtimestamp(float(metadata.get('timestamp', 0))).strftime('%H:%M:%S')}\n"
+                    context_text += f"• {source}.{event_type} at {datetime.fromtimestamp(float(metadata.get('timestamp', 0))).strftime('%H:%M:%S')}: {document}\n"
                 context_text += "\n"
             
             # Add user state info

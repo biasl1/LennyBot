@@ -4,11 +4,12 @@ import re
 import uuid
 import datetime
 from typing import Tuple, Dict, Any, Optional
-
 from modules.database import get_reminder_collection
 from modules.time_extractor import extract_time
 from modules.user_interaction import update_conversation_state, get_conversation_state
 from modules.meta_context import get_meta_context
+from modules.prompts import PromptManager
+from modules import ollama_service
 
 reminder_collection = get_reminder_collection()
 
@@ -36,8 +37,7 @@ def process_reminder_intent(chat_id: int, user_name: str, message: str) -> Dict[
     }
     
     # Process first-turn complete reminder
-    if has_time_info and ":" in message and len(message.split()) > 3:
-        # This message likely has both time and content
+    if has_time_info:
         time_match = re.search(r'\b(at|in|tomorrow|today|[0-9]+(:[0-9]+)?(\s*[ap]m)?)', message.lower())
         if time_match:
             time_part = time_match.group(0)
@@ -183,11 +183,35 @@ def create_reminder(decision: Dict[str, Any]) -> Tuple[bool, str]:
             "reminder_id": reminder_id
         })
         
-        return True, f"✅ I'll remind you about '{reminder_message}' {time_phrase}."
+        # Only use LLM if we have time for a better user experience
+        if due_time - time.time() > 60:  # If reminder is at least 1 minute away
+            # Create a more natural confirmation using the LLM
+            prompt = PromptManager.format_prompt(
+                "reminder_creation_confirmation",
+                message=reminder_message,
+                time=time_phrase,
+                user_name=user_name
+            )
+            
+            # Get a natural confirmation message
+            confirmation = ollama_service.process_message(
+                message=prompt,
+                system_role="reminder"
+            )
+            
+            # Post-process and validate
+            confirmation = PromptManager.post_process_response(confirmation)
+            
+            # Use generated confirmation if it seems valid
+            if confirmation and "remind" in confirmation.lower() and len(confirmation) > 20:
+                return True, confirmation
     
     except Exception as e:
         logging.error(f"Error creating reminder: {e}")
         return False, "I had trouble setting that reminder. Please try again."
+    
+    # Fallback to standard message
+    return True, f"✅ I'll remind you about '{reminder_message}' {time_phrase}."
 
 def check_due_reminders():
     """Check for reminders that are due and return them."""

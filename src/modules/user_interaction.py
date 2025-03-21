@@ -3,7 +3,7 @@ import logging
 import datetime
 import re
 import time
-
+from typing import Tuple, Dict, List, Any, Optional
 from modules.database import get_pin_collection
 
 # Define active conversations

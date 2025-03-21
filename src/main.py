@@ -1,3 +1,7 @@
+import typing
+import sys
+sys.modules['typing'] = typing  # Force typing module to be fully loaded
+from typing import Tuple, Dict, List, Any, Optional, Union
 import logging
 import sys
 import os

@@ -6,6 +6,7 @@ from modules.database import get_history_collection, get_reminder_collection, ge
 import chromadb
 from config import Config
 from chromadb.config import Settings
+from typing import Tuple, Dict, List, Any, Optional
 
 class KnowledgeStore:
     """Knowledge management for LennyBot."""

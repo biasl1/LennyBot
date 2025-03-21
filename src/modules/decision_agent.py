@@ -4,11 +4,12 @@ import torch
 import re 
 from transformers import AutoTokenizer, DistilBertForSequenceClassification
 from modules import ollama_service
-from typing import Dict, List, Any
+from typing import Tuple, Dict, List, Any, Optional
 import os
 from modules.user_interaction import update_conversation_state, get_conversation_state
 
-# Add to imports
+# Add centralized prompt manager import
+from modules.prompts import PromptManager
 from modules.meta_context import get_meta_context
 from modules.time_extractor import extract_time, get_current_time_formatted
 from modules.database import get_reminder_collection
@@ -123,11 +124,11 @@ class IntentClassifier:
 intent_classifier = IntentClassifier()
 
 def extract_reminder_details(message: str) -> Dict[str, Any]:
-    """Extract reminder text and time from a message."""
+    """Extract reminder text and time from a message with improved parsing."""
     timestamp = time.time()
     
-    # Check for common time patterns
-    time_pattern = r'\b(in|at|after|later|tomorrow|tonight|next|this)\b|\d+\s*(minute|min|hour|day|week|month|am|pm)'
+    # Check for common time patterns with more nuanced detection
+    time_pattern = r'\b(in|at|after|later|tomorrow|tonight|next|this)\s+\d*\s*(minute|min|hour|day|week|month|am|pm|seconds?)\b|\d+\s*(minute|min|hour|day|week|month|am|pm|seconds?)'
     has_time = bool(re.search(time_pattern, message.lower()))
     
     reminder_details = {
@@ -141,18 +142,30 @@ def extract_reminder_details(message: str) -> Dict[str, Any]:
         reminder_details["due_time"] = due_time
         reminder_details["time_str"] = time_str
         
-        # Extract the reminder message by removing time and command parts
-        content = re.sub(r'\bremind me\b|\breminder\b|\bin\b.*|\bat\b.*|\bafter\b.*|\blater\b.*|\btomorrow\b.*|\btonight\b.*', '', message, flags=re.IGNORECASE)
-        content = re.sub(r'\bto\b', '', content, 1, flags=re.IGNORECASE).strip()
-        
-        # Clean up the content
-        if content and len(content) > 2:
-            reminder_details["reminder_text"] = content
-            reminder_details["ready_to_create"] = True
-        else:
-            # Try harder to extract content
-            content = re.sub(r'remind me to ', '', message, flags=re.IGNORECASE)
-            content = re.sub(r'\bin\b.*|\bat\b.*|\bafter\b.*|\blater\b.*|\btomorrow\b.*|\btonight\b.*', '', content, flags=re.IGNORECASE).strip()
+        # Find the index where the time info starts
+        time_match = re.search(time_pattern, message.lower())
+        if time_match:
+            time_start_idx = time_match.start()
+            
+            # Extract content more intelligently
+            prefix_pattern = r'\b(remind me|reminder|remind|don\'t forget|remember)\b\s*(to|about)?'
+            prefix_match = re.search(prefix_pattern, message.lower())
+            
+            if prefix_match and prefix_match.end() < time_start_idx:
+                # Content between command and time
+                content = message[prefix_match.end():time_start_idx].strip()
+            elif "that" in message.lower() and time_start_idx < message.lower().find("that"):
+                # Content after time info with "that" indicator
+                that_idx = message.lower().find("that")
+                content = message[that_idx + 4:].strip()
+            else:
+                # Try general extraction
+                content = re.sub(r'\b(remind me|reminder|remind|don\'t forget|remember)\b\s*(to|about)?', '', message, flags=re.IGNORECASE)
+                content = re.sub(time_pattern, '', content, flags=re.IGNORECASE).strip()
+                
+            # Clean up connecting words at the start
+            content = re.sub(r'^(to|about|that)\s+', '', content, flags=re.IGNORECASE)
+            
             if content and len(content) > 2:
                 reminder_details["reminder_text"] = content
                 reminder_details["ready_to_create"] = True
@@ -214,19 +227,75 @@ def create_reminder(chat_id: int, user_name: str, reminder_details: Dict[str, An
         logging.error(f"Error creating reminder: {e}")
         return "I had trouble setting up that reminder. Please try again."
 
-def snowball_prompt(message: str, context: List[Dict] = None, chat_id: int = None, user_name: str = None) -> Dict[str, Any]:
-    """Enhanced snowball prompt with meta-context integration."""
+def snowball_prompt(messages, context=None, chat_id=None, user_name=None):
+    """Enhanced snowball prompt for single or multiple messages."""
+    # For multiple messages, use a combined approach
+    if isinstance(messages, list) and len(messages) > 1:
+        # Extract the primary intent from the combination
+        combined_text = "\n".join(messages)
+        intent, confidence = intent_classifier.classify(combined_text)
+        
+        # If this is a chat, generate a cohesive response to all messages
+        if intent == "chat":
+            # Use batch template for multiple messages
+            prompt = PromptManager.create_batch_prompt(messages)
+            
+            # Add conversation context if available
+            if context:
+                prompt = PromptManager.format_prompt(
+                    "with_context",
+                    context=context[:1000],  # Limit context length
+                    message=prompt
+                )
+                
+            # Get response with chat system prompt
+            response = ollama_service.process_message(
+                message=prompt, 
+                system_role="chat"
+            )
+            
+            return {
+                "intent": "chat",
+                "confidence": confidence,
+                "messages": messages,
+                "response_plan": response,
+                "user_id": chat_id,
+                "user_name": user_name
+            }
+            
+        # For reminders, we need to handle them individually
+        elif intent == "reminder":
+            # Process each reminder separately
+            reminder_results = []
+            for msg in messages:
+                reminder_details = extract_reminder_details(msg)
+                if reminder_details.get("ready_to_create", False):
+                    reminder_results.append({
+                        "message": msg,
+                        "details": reminder_details
+                    })
+                    
+            return {
+                "intent": "reminder",
+                "confidence": confidence,
+                "batch_mode": True,
+                "reminder_details": reminder_results,
+                "user_id": chat_id,
+                "user_name": user_name
+            }
+    
+    # For single message (or fallback), use the regular approach
     meta_context = get_meta_context()
     
     # Step 1: Classify the intent using DistilBERT
-    intent, confidence = intent_classifier.classify(message)
+    intent, confidence = intent_classifier.classify(messages)
     
     # Log intent classification to meta-context
     meta_context.log_event("intent", "intent_classified", {
         "timestamp": time.time(),
         "chat_id": chat_id, 
         "user_name": user_name,
-        "message": message,
+        "message": messages,
         "intent": intent,
         "confidence": confidence
     })
@@ -243,41 +312,41 @@ def snowball_prompt(message: str, context: List[Dict] = None, chat_id: int = Non
     # Enhanced specialized processing based on intent type
     if intent == "question":
         # Time-specific handling
-        if any(word in message.lower() for word in ["time", "date", "day", "month", "year", "hour"]):
+        if any(word in messages.lower() for word in ["time", "date", "day", "month", "year", "hour"]):
             current_time = get_current_time_formatted()
             action_details["current_time"] = current_time
             action_details["is_time_question"] = True
             
-            # Special system prompt for time questions
-            system_prompt = "You are LennyBot. This is a time-related question. Answer with the current time information."
+            # Use centralized time-aware prompt system
+            system_prompt = PromptManager.get_system_prompt("time_aware")
             
-            # Generate specialized time response
-            prompt = f"""
-            The user wants to know about time: "{message}"
-            
-            The current time is: {current_time}
-            
-            Create a friendly, concise response that includes this time information.
-            """
+            # Use time query template
+            prompt = PromptManager.format_prompt(
+                "time_query",
+                message=messages,
+                time=current_time
+            )
             
             response_plan = ollama_service.process_message(prompt, system_prompt=system_prompt)
+            response_plan = PromptManager.post_process_response(response_plan)
+            
             return {
                 "intent": intent,
                 "confidence": confidence,
-                "original_message": message,
+                "original_message": messages,
                 "action_details": action_details,
                 "response_plan": response_plan,
                 "user_id": chat_id,
                 "user_name": user_name
             }
     
-    elif intent == "reminder" or (intent == "action" and any(word in message.lower() for word in ["remind", "reminder", "remember"])):
+    elif intent == "reminder" or (intent == "action" and any(word in messages.lower() for word in ["remind", "reminder", "remember"])):
         # Enhanced reminder handling with immediate creation
-        reminder_details = extract_reminder_details(message)
+        reminder_details = extract_reminder_details(messages)
         action_details.update(reminder_details)
         
         # Check for list reminders request
-        if re.search(r'\b(list|show|all|my)\s+reminders\b', message.lower()):
+        if re.search(r'\b(list|show|all|my)\s+reminders\b', messages.lower()):
             action_details["list_reminders"] = True
             # Skip reminder creation, just return intent for listing
         elif reminder_details.get("ready_to_create", False):
@@ -288,7 +357,7 @@ def snowball_prompt(message: str, context: List[Dict] = None, chat_id: int = Non
             return {
                 "intent": "reminder",
                 "confidence": confidence,
-                "original_message": message,
+                "original_message": messages,
                 "action_details": action_details,
                 "response_plan": confirmation_message,
                 "user_id": chat_id,
@@ -298,7 +367,7 @@ def snowball_prompt(message: str, context: List[Dict] = None, chat_id: int = Non
         
     elif intent == "search":
         # Search enhancement - extract key search terms
-        action_details["search_terms"] = [term for term in re.findall(r'\b\w{3,}\b', message.lower()) 
+        action_details["search_terms"] = [term for term in re.findall(r'\b\w{3,}\b', messages.lower()) 
                                          if term not in ["the", "and", "search", "for", "find", "about", "information"]]
         
         # Try to fetch from knowledge store for relevant context
@@ -311,24 +380,27 @@ def snowball_prompt(message: str, context: List[Dict] = None, chat_id: int = Non
                 action_details["knowledge_results"] = results
                 knowledge_text = "\n".join([result["content"] for result in results])
                 
-                # Add knowledge context 
-                context_str += f"\n\nRELEVANT KNOWLEDGE:\n{knowledge_text}\n"
+                # Use the PromptManager to enhance with knowledge
+                context_str = PromptManager.enhance_with_knowledge(context_str, knowledge_text)
         except Exception as e:
             logging.error(f"Error fetching from knowledge store: {e}")
             
-    # For non-reminder intents, generate the intent analysis with the specialized context
+    # For non-reminder intents or reminders that need more info, generate intent analysis
     if intent != "reminder" or not action_details.get("ready_to_create", False):
         try:
+            # Use centralized decision prompt
+            decision_prompt = PromptManager.create_decision_prompt(
+                message=messages,
+                context=context_str[:2000]
+            )
+            
+            # Get system prompt for decision
+            decision_system_prompt = PromptManager.get_system_prompt("decision")
+            
+            # Send to Ollama
             intent_analysis = ollama_service.send_to_ollama(
-                prompt=f"""Analyze this user message: '{message}'
-                
-                CONTEXT:
-                {context_str[:2000]}
-                
-                Identify the core intent and extract any specific details needed to fulfill this request.
-                Focus on: time references, entities, actions, and any missing information.
-                """,
-                system_prompt=f"You are a specialized intent analyzer for {intent} requests. Extract key information that would be needed to fulfill this type of request."
+                prompt=decision_prompt,
+                system_prompt=decision_system_prompt
             )
             
             # Log the analysis
@@ -339,33 +411,53 @@ def snowball_prompt(message: str, context: List[Dict] = None, chat_id: int = Non
                 "analysis_summary": intent_analysis.get("response", "")[:100]
             })
             
-            # Create specialized system prompt based on intent
-            system_prompt = f"You are LennyBot, a helpful assistant. You're responding to a {intent} request."
-            
+            # Determine the appropriate system prompt role
             if intent == "question" and action_details.get("is_time_question"):
-                system_prompt += f"\nInclude the current time ({action_details['current_time']}) in your response."
-            
-            if intent == "search" and action_details.get("knowledge_results"):
-                system_prompt += "\nIncorporate the knowledge search results in your response."
-            
-            # Generate response plan
-            prompt = f"""
-            Based on:
-            - User's message: '{message}'
-            - Intent: {intent} (confidence: {confidence:.2f})
-            - Analysis: {intent_analysis.get('response', '')[:300]}
-            
-            CONVERSATION CONTEXT:
-            {context_str[:500]}
-            
-            Create a helpful, concise response that directly addresses the user's request.
-            For questions, provide accurate information. For chat, be engaging but brief.
-            """
+                system_role = "time_aware"
+            elif intent == "search" and action_details.get("knowledge_results"):
+                system_role = "knowledge_enhanced"
+            else:
+                system_role = intent
+                
+            # Get the appropriate system prompt
+            system_prompt = PromptManager.get_system_prompt(system_role)
             
             # Only generate a response for non-reminder intents or list_reminders
             response_plan = ""
             if intent != "reminder" or action_details.get("list_reminders"):
-                response_plan = ollama_service.process_message(prompt, system_prompt=system_prompt)
+                # Create a context-aware action prompt
+                prompt = PromptManager.create_action_prompt(
+                    message=messages,
+                    intent=intent,
+                    context=context_str[:500],
+                    turns=1,
+                    confidence=confidence,
+                    analysis=intent_analysis.get('response', '')[:300]
+                )
+                
+                # Add special parameters based on intent
+                if intent == "question" and action_details.get("is_time_question"):
+                    prompt = PromptManager.format_prompt(
+                        "time_query",
+                        message=messages,
+                        time=action_details.get("current_time")
+                    )
+                elif action_details.get("knowledge_results"):
+                    knowledge_text = "\n".join([result["content"] for result in action_details["knowledge_results"]])
+                    prompt = PromptManager.format_prompt(
+                        "knowledge_enhanced",
+                        message=messages,
+                        knowledge=knowledge_text
+                    )
+                
+                # Process the message with the appropriate system prompt
+                response_plan = ollama_service.process_message(
+                    message=prompt, 
+                    system_role=system_role
+                )
+                
+                # Apply post-processing
+                response_plan = PromptManager.post_process_response(response_plan)
                 
             # Update action_details for the response
             action_details["response_plan"] = response_plan
@@ -376,13 +468,12 @@ def snowball_prompt(message: str, context: List[Dict] = None, chat_id: int = Non
     return {
         "intent": intent,
         "confidence": confidence,
-        "original_message": message,
+        "original_message": messages,
         "action_details": action_details,
         "response_plan": action_details.get("response_plan", ""),
         "user_id": chat_id,
         "user_name": user_name
     }
-
 
 def decide_action(pin: dict) -> dict:
     """Enhanced decision agent using the snowball prompt system."""
@@ -442,7 +533,7 @@ def get_classifier_info():
     """Return information about the intent classifier for self-awareness."""
     return {
         "model_name": "distilbert-base-uncased fine-tuned",
-        "intents": INTENTS,  # Use the global INTENTS list for consistency
-        "threshold": 0.55,  # Current confidence threshold
+        "intents": INTENTS,
+        "threshold": 0.55,
         "loaded": intent_classifier is not None and intent_classifier.model is not None
     }

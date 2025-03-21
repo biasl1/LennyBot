@@ -1,56 +1,94 @@
+from typing import Tuple, Dict, List, Any, Optional
 import re
 import datetime
 import logging
 import time
 
-def extract_time(text, base_timestamp=None):
-    """Extract time from text message."""
-    if not base_timestamp:
-        base_timestamp = time.time()
+def extract_time(text: str, reference_time: float = None) -> Tuple[float, str]:
+    """
+    Extract time information from natural language text with enhanced accuracy.
+    Returns (timestamp, human-readable string)
+    """
+    if reference_time is None:
+        reference_time = time.time()
     
+    # Make sure text is lowercase for consistent matching
     text = text.lower()
-    extracted_time = None
-    time_description = None
     
-    # Relative time patterns (most common in chat)
-    rel_patterns = [
-        (r'in (\d+) (minute|minutes|min|mins)', lambda m: int(m.group(1)) * 60),
-        (r'in (\d+) (hour|hours|hr|hrs)', lambda m: int(m.group(1)) * 3600),
-        (r'in (\d+) (second|seconds|sec|secs)', lambda m: int(m.group(1))),
-        (r'in (a|one) (minute|min)', lambda m: 60),
-        (r'in (a|one) (hour|hr)', lambda m: 3600)
-    ]
+    # Define patterns with more precise recognition
+    # Minutes pattern (e.g., "in 5 minutes", "in a minute")
+    min_pattern = r'in\s+(\d+|a|an|one|two|three|five|ten|fifteen|twenty|thirty|forty|fifty|sixty|half)\s*(minute|min|minutes|mins)'
+    min_match = re.search(min_pattern, text)
     
-    # Absolute time patterns
-    abs_patterns = [
-        (r'at (\d{1,2})(?::(\d{2}))?(?:\s*(am|pm))?', parse_clock_time),
-        (r'(\d{1,2})(?::(\d{2}))?(?:\s*(am|pm))', parse_clock_time)
-    ]
+    if min_match:
+        # Convert text numbers to digits
+        num_map = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "five": 5, 
+                   "ten": 10, "fifteen": 15, "twenty": 20, "thirty": 30, 
+                   "forty": 40, "fifty": 50, "sixty": 60, "half": 0.5}
+        
+        minutes_str = min_match.group(1)
+        minutes = num_map.get(minutes_str, None)
+        
+        if minutes is None:
+            try:
+                minutes = int(minutes_str)
+            except ValueError:
+                minutes = 1  # Default to 1 minute if parsing fails
+        
+        future_time = reference_time + (minutes * 60)
+        return future_time, f"in {minutes} minute{'s' if minutes != 1 else ''}"
     
-    # Try relative patterns first (most common in chat)
-    for pattern, time_func in rel_patterns:
-        match = re.search(pattern, text)
-        if match:
-            seconds_to_add = time_func(match)
-            extracted_time = base_timestamp + seconds_to_add
-            time_description = match.group(0)
-            break
+    # Hours pattern (e.g., "in 2 hours", "in an hour")
+    hour_pattern = r'in\s+(\d+|a|an|one|two|three|four|five|six|twelve|half)\s*(hour|hr|hours|hrs)'
+    hour_match = re.search(hour_pattern, text)
     
-    # Try absolute time patterns if no relative match
-    if not extracted_time:
-        for pattern, time_func in abs_patterns:
-            match = re.search(pattern, text)
-            if match:
-                extracted_time = time_func(match, base_timestamp)
-                time_description = match.group(0)
-                break
+    if hour_match:
+        num_map = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, 
+                   "five": 5, "six": 6, "twelve": 12, "half": 0.5}
+        
+        hours_str = hour_match.group(1)
+        hours = num_map.get(hours_str, None)
+        
+        if hours is None:
+            try:
+                hours = int(hours_str)
+            except ValueError:
+                hours = 1  # Default to 1 hour if parsing fails
+        
+        future_time = reference_time + (hours * 3600)
+        return future_time, f"in {hours} hour{'s' if hours != 1 else ''}"
     
-    # Default to 1 minute if no time found
-    if not extracted_time:
-        extracted_time = base_timestamp + 60
-        time_description = "in 1 minute (default)"
+    # Time of day pattern (e.g., "at 3pm", "at 15:30")
+    time_of_day_pattern = r'at\s+(\d+)(?::(\d+))?\s*(am|pm)?'
+    time_match = re.search(time_of_day_pattern, text)
     
-    return extracted_time, time_description
+    if time_match:
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2)) if time_match.group(2) else 0
+        ampm = time_match.group(3)
+        
+        # Convert to 24-hour format if needed
+        if ampm:
+            if ampm.lower() == 'pm' and hour < 12:
+                hour += 12
+            elif ampm.lower() == 'am' and hour == 12:
+                hour = 0
+        elif hour < 7:  # Assume PM for times like "at 5" (5pm, not 5am)
+            hour += 12
+            
+        # Get current time components
+        now = datetime.datetime.fromtimestamp(reference_time)
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        
+        # If the time has already passed today, assume tomorrow
+        if target.timestamp() <= reference_time:
+            target = target + datetime.timedelta(days=1)
+            
+        return target.timestamp(), f"at {hour}:{minute:02d}{'am' if hour < 12 else 'pm'}"
+    
+    # Default: if no clear time, set reminder for 1 minute from now
+    future_time = reference_time + 60
+    return future_time, f"in 1 minute (default)"
 
 def parse_clock_time(match, base_timestamp):
     """Parse clock time formats."""
@@ -76,7 +114,7 @@ def parse_clock_time(match, base_timestamp):
 
 def get_current_time_formatted():
     """Return the current time in a nicely formatted way."""
-    now = datetime.now()
+    now = datetime.datetime.now()
     
     # Format: "3:45 PM, Tuesday, March 21, 2025"
     time_str = now.strftime("%I:%M %p, %A, %B %d, %Y")

@@ -1,130 +1,91 @@
+# ADD THIS AT THE VERY TOP - BEFORE ANY OTHER IMPORTS
+from typing import Tuple, Dict, List, Any, Optional, Union
+
 import re
 import datetime
 import logging
 import time
+import uuid
 from telegram import Update
 from telegram.ext import ContextTypes
 from modules import ollama_service
+from typing import Tuple, Dict, List, Any, Optional
 from modules.user_interaction import update_conversation_state, get_conversation_state
 from modules.database import get_history_collection, get_reminder_collection
 from modules.time_extractor import extract_time
-# Add missing import
-import uuid
-# Add to imports
-from modules.meta_context import get_meta_context
-
-# Implement enhance_with_knowledge function directly in this file
-def enhance_with_knowledge(prompt, chat_id):
-    """Enhance a prompt with relevant knowledge from the knowledge store."""
-    try:
-        from modules.knowledge_store import KnowledgeStore
-        knowledge_store = KnowledgeStore()
-        
-        # Extract key terms from the prompt
-        import re
-        search_terms = [term for term in re.findall(r'\b\w{3,}\b', prompt.lower()) 
-                      if term not in ["the", "and", "for", "that", "this", "with", "you", "what", "how", "when"]]
-        
-        # Use top 5 most relevant terms for search
-        if search_terms:
-            search_query = " ".join(search_terms[:5])
-            results = knowledge_store.search_knowledge(search_query, limit=1)
-            
-            # Add knowledge to prompt if found
-            if results and len(results) > 0:
-                knowledge_text = results[0].get("content", "")
-                prompt += f"\n\nRELEVANT KNOWLEDGE:\n{knowledge_text}\n"
-                
-                # Log the knowledge enhancement
-                get_meta_context().log_event("action", "knowledge_enhanced", {
-                    "timestamp": time.time(),
-                    "chat_id": chat_id,
-                    "search_terms": search_terms[:5],
-                    "knowledge_id": results[0].get("id", "unknown")
-                })
-        
-        return prompt
-    except Exception as e:
-        logging.error(f"Error enhancing with knowledge: {e}")
-        return prompt  # Return original prompt on error
+from modules.meta_context import get_meta_context, enhance_with_knowledge
+from modules.prompts import PromptManager
+from modules.knowledge_store import KnowledgeStore
 
 async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action: dict):
-    # Extract existing variables
+    """Execute an action based on user intent and context."""
+    # Extract basic information
     chat_id = update.effective_chat.id
     user_name = update.effective_user.first_name
-    message = action.get("original_message", "")
+    user_message = action.get("original_message", "")
+    intent = action.get("intent", "chat")
+    timestamp = time.time()
     
     # Get meta-context
     meta_context = get_meta_context()
     
-    # Handle time-related questions better
-    if action.get("intent") == "question" and any(word in message.lower() 
-                                               for word in ["time", "clock", "hour", "date", "day", "today"]):
-        from modules.time_extractor import get_current_time_formatted
-        current_time = get_current_time_formatted()
-        
-        # Fix placeholder text in responses
-        if "[insert" in action.get("response_plan", "") or "current time" in action.get("response_plan", ""):
-            action["response_plan"] = f"It's currently {current_time}."
-        else:
-            # Add time information to existing response
-            action["response_plan"] = f"{action.get('response_plan', '').strip()} (Current time: {current_time})"
-        
-        # Log specialized response
-        meta_context.log_event("action", "time_response", {
-            "timestamp": time.time(),
-            "chat_id": chat_id,
-            "time_provided": current_time
-        })
-        
-    # Extract chat_id first, before using it
-    chat_id = update.effective_chat.id
-    context_str = meta_context.get_unified_context(chat_id, minutes=10)
-
-    # Get collections from database module
+    # Log action execution start
+    meta_context.log_event("action", "action_execution_started", {
+        "timestamp": timestamp,
+        "chat_id": chat_id,
+        "intent": intent,
+        "user_name": user_name
+    })
+    
+    # Generate unique ID for this interaction
+    unique_id = f"pin-{chat_id}-{int(timestamp)}"
+    logging.info(f"Stored pin: {unique_id}")
+    
+    # Store this message in conversation history
     history_collection = get_history_collection()
     reminder_collection = get_reminder_collection()
     
     try:
-        # Extract basic information
-        intent = action.get("intent", "chat")
-        user_message = action.get("original_message", "")
-        user_name = update.effective_user.first_name
-        chat_id = update.effective_chat.id
-        timestamp = time.time()
+        history_collection.add(
+            documents=[user_message],
+            metadatas=[{
+                "chat_id": str(chat_id),
+                "user_name": user_name,
+                "timestamp": str(timestamp),
+                "is_user": "true"
+            }],
+            ids=[unique_id]
+        )
+    except Exception as e:
+        logging.error(f"Error storing message in history: {e}")
+    
+    # Send typing indicator
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    
+    # Get conversation state
+    current_state = get_conversation_state(chat_id)
+    
+    try:
+        # Get recent conversation context
+        context_str = meta_context.get_unified_context(chat_id, minutes=10)
         
-        # Log action execution start
-        meta_context.log_event("action", "action_execution_started", {
-            "timestamp": timestamp,
-            "chat_id": chat_id,
-            "intent": intent,
-            "user_name": user_name
-        })
-        
-        # Generate unique ID for this interaction
-        unique_id = f"pin-{chat_id}-{int(timestamp)}"
-        logging.info(f"Stored pin: {unique_id}")
-        
-        # Store this message in conversation history
-        try:
-            history_collection.add(
-                documents=[user_message],
-                metadatas=[{
-                    "chat_id": str(chat_id),
-                    "user_name": user_name,
-                    "timestamp": str(timestamp),
-                    "is_user": "true"
-                }],
-                ids=[unique_id]
-            )
-        except Exception as e:
-            logging.error(f"Error storing message in history: {e}")
-        
-        # Send typing indicator
-        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-        
-        # Get conversation state
-        current_state = get_conversation_state(chat_id)
+        # Handle time-related questions
+        current_time = None
+        if intent == "question" and any(word in user_message.lower() 
+                                    for word in ["time", "clock", "hour", "date", "day", "today"]):
+            current_time = get_current_time_formatted()
+            
+            # Log specialized response
+            meta_context.log_event("action", "time_response", {
+                "timestamp": time.time(),
+                "chat_id": chat_id,
+                "time_provided": current_time
+            })
+            
+            # If snowball provided a response_plan with time placeholder, update it
+            if action.get("response_plan") and ("[insert" in action.get("response_plan", "") or 
+                                                "current time" in action.get("response_plan", "")):
+                action["response_plan"] = f"It's currently {current_time}."
         
         # Handle intent-specific actions
         if intent == "reminder":
@@ -212,39 +173,59 @@ async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, act
             # Use the pre-generated response from snowball
             response = response_plan
         else:
-            # Fallback to traditional method
-            # Get recent conversation context
+            # Get knowledge enhancement if applicable
+            knowledge = None
             try:
-                recent_context = get_meta_context().get_unified_context(chat_id, minutes=10)
+                # Extract key terms and search for knowledge
+                knowledge_store = KnowledgeStore()
+                search_terms = [term for term in re.findall(r'\b\w{3,}\b', user_message.lower()) 
+                             if term not in ["the", "and", "for", "that", "this", "with", "you", "what", "how", "when"]]
+                
+                if search_terms:
+                    search_query = " ".join(search_terms[:5])
+                    results = knowledge_store.search_knowledge(search_query, limit=1)
+                    
+                    if results and len(results) > 0:
+                        knowledge = results[0].get("content", "")
+                        
+                        # Log the knowledge enhancement
+                        meta_context.log_event("action", "knowledge_enhanced", {
+                            "timestamp": time.time(),
+                            "chat_id": chat_id,
+                            "search_terms": search_terms[:5],
+                            "knowledge_id": results[0].get("id", "unknown")
+                        })
             except Exception as e:
-                logging.error(f"Error retrieving context: {e}")
-                recent_context = "No recent context available."
+                logging.error(f"Error retrieving knowledge: {e}")
             
-            # Build an enhanced prompt with self-awareness and knowledge
-            prompt = f"""You are LennyBot, a friendly and helpful Telegram assistant.
-
-CONVERSATION CONTEXT:
-{recent_context}
-
-SYSTEM AWARENESS:
-- Current intent: {action['intent']}
-- Conversation turns: {current_state.get('turns', 1) if current_state else 1}
-- Confidence level: {action.get('confidence', 'unknown')}
-
-USER MESSAGE: {action['original_message']}
-
-Based on this context and system state, provide a helpful response. If the conversation has multiple turns, ensure continuity.
-"""
+            # Create a prompt using the PromptManager
+            prompt = PromptManager.create_action_prompt(
+                message=user_message,
+                intent=intent,
+                context=context_str,
+                turns=current_state.get('turns', 1) if current_state else 1,
+                confidence=action.get('confidence', 0.0),
+                knowledge=knowledge,
+                time=current_time
+            )
             
-            # Enhance with knowledge using our local function
-            prompt = enhance_with_knowledge(prompt, chat_id)
+            # Log the prompt (debug level)
+            logging.debug(f"Prompt for {intent}: {prompt[:100]}...")
             
-            # Get response with safeguards
-            response = ollama_service.process_message(prompt)
+            # Get response using the appropriate system prompt for this intent
+            response = ollama_service.process_message(
+                message=prompt, 
+                system_role=intent if intent in PromptManager.SYSTEM_PROMPTS else "general"
+            )
+        
+        # Apply post-processing to clean up the response
+        response = PromptManager.post_process_response(response)
         
         # Final validation - ensure we have text to send
         if not response or len(response.strip()) == 0:
-            response = f"I understand. How else can I help you, {user_name}?"
+            response = PromptManager.get_fallback_response(intent)
+            if user_name:
+                response = response.replace("{user_name}", user_name)
         
         # Send response
         await update.message.reply_text(response)
@@ -276,16 +257,11 @@ Based on this context and system state, provide a helpful response. If the conve
         # Log the error to meta-context
         meta_context.log_event("action", "action_execution_error", {
             "timestamp": time.time(),
-            "chat_id": chat_id if 'chat_id' in locals() else "unknown",
+            "chat_id": chat_id,
             "error": str(e)
         })
         
         logging.error(f"Error in execute_action: {e}", exc_info=True)
-        # Always send a valid fallback
-        await update.message.reply_text("I'm having trouble processing that. Let me know if you'd like to try again.")
-
-    # Get the context
-    recent_context = meta_context.get_unified_context(chat_id, minutes=10)
-    
-    # Log the context (for debugging)
-    logging.debug(f"CONTEXT WINDOW for {chat_id}:\n{recent_context}")
+        
+        # Use standardized error fallback response
+        await update.message.reply_text(PromptManager.get_fallback_response("error"))

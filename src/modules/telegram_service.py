@@ -1,3 +1,4 @@
+from typing import Tuple, Dict, List, Any, Optional
 import logging
 import os
 import sys
@@ -6,6 +7,7 @@ import threading
 import time
 from telegram import Update
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.request import HTTPXRequest
 
 # Setup paths and imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -44,68 +46,112 @@ Just chat with me naturally!
     await update.message.reply_text(help_text)
 
 
-# Update handle_message
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process incoming message with meta-context logging."""
-    user_message = update.message.text
-    user_name = update.effective_user.first_name
-    chat_id = update.message.chat_id
-    timestamp = time.time()
-    
-    # Get meta-context
-    meta_context = get_meta_context()
-    
-    # Log the incoming message
-    meta_context.log_event("telegram", "message_received", {
-        "timestamp": timestamp,
-        "chat_id": chat_id,
-        "user_name": user_name,
-        "message": user_message
-    })
-    
-    logger.info(f"Received message from {user_name}: {user_message}")
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle incoming messages by queueing them for batch processing."""
+    try:
+        # Extract message information
+        user = update.effective_user
+        message_text = update.message.text
+        chat_id = update.effective_chat.id
+        
+        # Log the message but don't process immediately
+        logging.info(f"Received message from {user.first_name}: {message_text}")
+        
+        # Store the message in the meta-context for batch processing
+        store_message_for_batch_processing(user, message_text, chat_id)
+        
+        # Special handling for explicit commands that should be processed immediately
+        if message_text.startswith('/'):
+            # Handle commands immediately
+            await execute_action(update, context, "command")
+            
+    except Exception as e:
+        logging.error(f"Error in handle_message: {e}")
 
-    # Store the pin
-    pin = store_pin(chat_id, user_message)
-
-    # Decide on the action
-    action = decide_action(pin)
+def store_message_for_batch_processing(user, message_text, chat_id):
+    """Store the message in meta-context for batch processing with improved metadata."""
+    from modules.meta_context import get_meta_context
+    meta = get_meta_context()
     
-    # Log the decision
-    meta_context.log_event("decision", "intent_decided", {
-        "timestamp": time.time(),
-        "chat_id": chat_id,
-        "intent": action.get("intent", "unknown"),
-        "confidence": action.get("confidence", 0),
-        "user_name": user_name
-    })
-
-    # Execute the action (send the response)
-    await execute_action(update, context, action)
+    # Create a standardized pin ID format (be consistent!)
+    timestamp = int(time.time())
+    pin_id = f"telegram-message_received-{timestamp}"
     
-    # Log completion
-    meta_context.log_event("telegram", "message_processed", {
-        "timestamp": time.time(),
-        "chat_id": chat_id,
-        "processing_time": time.time() - timestamp
-    })
+    # Store the message with enhanced metadata
+    meta.context_collection.add(
+        ids=[pin_id],
+        documents=[message_text],  # Store the actual message text
+        metadatas=[{
+            "event_type": "message_received",
+            "user_id": str(user.id),
+            "user_name": user.first_name,
+            "chat_id": str(chat_id),
+            "timestamp": timestamp,  # Use integer timestamp consistently
+            "processed": "false",
+            "source": "telegram",
+            "content_type": "text"
+        }]
+    )
+    
+    # Use consistent pin ID format in logging
+    logging.info(f"Stored pin: pin-{chat_id}-{timestamp}")
 
 # This function will be called by the application once it's running
 async def post_init(application: Application):
     """Initialize the context scheduler after the application has started."""
-    # Create and start the context scheduler
+    # Create and start the context scheduler only if not already running
     context_scheduler = get_context_scheduler(application.bot)
-    logging.info("Created new context scheduler")
     
-    # Start the scheduler
-    context_scheduler.start()
-    logging.info("Context scheduler started successfully!")
-    
-    # Log this event
-    get_meta_context().log_event("system", "scheduler_started", {
-        "timestamp": time.time(),
-        "type": "context_scheduler"
-    })
+    if not context_scheduler.running:
+        logging.info("Created new context scheduler")
+        # Start the scheduler
+        context_scheduler.start()
+        logging.info("Context scheduler started successfully!")
+        
+        # Log this event
+        get_meta_context().log_event("system", "scheduler_started", {
+            "timestamp": time.time(),
+            "type": "context_scheduler"
+        })
+    else:
+        logging.info("Context scheduler already running")
+
+async def process_batched_messages(bot, chat_id, combined_context, messages):
+    """Process multiple messages as a batch and send a single response."""
+    try:
+        # Use a simple typing indicator that won't block too long
+        await bot.send_chat_action(chat_id=chat_id, action="typing")
+        
+        # Determine the most recent intent from these messages
+        from modules.decision_agent import get_intent_classifier
+        classifier = get_intent_classifier()
+        intent, confidence = classifier.classify(combined_context)
+        
+        logging.info(f"Batch classified as {intent} with confidence {confidence}")
+        
+        # Generate a single response for all messages
+        from modules.response_generator import generate_response
+        response = generate_response(combined_context, intent=intent)
+        
+        # Send a single response
+        await bot.send_message(
+            chat_id=chat_id,
+            text=response,
+            parse_mode="HTML"
+        )
+        
+        logging.info(f"Sent batched response to chat {chat_id} for {len(messages)} messages")
+        
+    except Exception as e:
+        logging.error(f"Error in batch processing: {e}")
+        # Try a simple fallback message
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="I'm having some trouble processing your messages right now. Let me get back to you shortly."
+            )
+        except:
+            pass
 
 async def context_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Display the current conversation context window."""
@@ -306,3 +352,15 @@ def get_bot():
     """Get the Telegram bot instance."""
     global application
     return application.bot if application else None
+
+def create_application(token):
+    """Create Telegram application with optimized connection settings."""
+    # Fix connection pool issues by increasing pool limits
+    request = HTTPXRequest(
+        connection_pool_size=8,  # Increase from default
+        read_timeout=30,
+        write_timeout=30,
+        connect_timeout=30,
+        pool_timeout=3.0  # Prevent deadlocks
+    )
+    return Application.builder().token(token).request(request).build()
