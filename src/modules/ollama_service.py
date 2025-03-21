@@ -1,70 +1,116 @@
 import requests
 import logging
 import time
+import json
 import re
 from config import Config
 from modules.prompts import PromptManager
 
-def process_message(message, system_role="general", conversation_history=None, verbose=False):
-    """
-    Process a message through Ollama and return the response.
-    
-    Args:
-        message (str): The message to process
-        system_role (str): The role/intent to use for selecting the system prompt
-        conversation_history (str): Optional conversation history
-        verbose (bool): Whether to log verbose information
-        
-    Returns:
-        str: The processed response
-    """
-    start_time = time.time()
-    
+def process_message(message, system_role="general"):
+    """Process a message through Ollama API using requests."""
     try:
-        # Get the appropriate system prompt using the PromptManager
-        system_prompt = PromptManager.get_system_prompt(system_role)
+        system_prompt = PromptManager.SYSTEM_PROMPTS.get(system_role, PromptManager.SYSTEM_PROMPTS["general"])
         
-        # Format the complete prompt with conversation history if provided
-        if conversation_history:
-            full_prompt = PromptManager.format_prompt(
-                "with_context",
-                context=conversation_history,
-                message=message
-            )
+        # Force conversational style with explicit formatting
+        system_prompt += """
+
+FINAL REMINDER: 
+- YOU ARE REPLYING IN A CASUAL CONVERSATION
+- SPEAK DIRECTLY TO THE PERSON
+- NEVER ANALYZE WHAT THEY SAID
+- BE BRIEF AND FRIENDLY"""
+        
+        # Log shortened prompt for debugging
+        logging.info(f"Sending prompt to Ollama: {message[:100]}...")
+        
+        start_time = time.time()
+        
+        # Create the payload for the Ollama API
+        payload = {
+            "model": "phi",  # Using phi as in the original code
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user", 
+                    "content": message
+                }
+            ],
+            "stream": False,
+            "options": {
+                "temperature": 0.8,
+                "top_p": 0.9
+            }
+        }
+        
+        # Make the API request
+        response = requests.post(
+            "http://localhost:11434/api/chat",
+            json=payload,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        # Process the response
+        if response.status_code == 200:
+            try:
+                response_data = response.json()
+                response_text = response_data.get('message', {}).get('content', '')
+                
+                if not response_text:
+                    return create_contextual_fallback(message)
+                    
+            except json.JSONDecodeError:
+                logging.warning(f"JSON decode error. Response text: {response.text[:200]}...")
+                return create_contextual_fallback(message)
         else:
-            full_prompt = message
-            
-        # Log what we're sending to Ollama
-        logging.info(f"Sending prompt to Ollama: {full_prompt[:100]}...")
+            logging.error(f"Ollama API error: {response.status_code}, {response.text[:200]}")
+            return create_contextual_fallback(message)
         
-        # Send to Ollama
-        response_data = send_to_ollama(full_prompt, system_prompt)
+        duration = time.time() - start_time
         
-        # Extract and process the response text
-        if isinstance(response_data, dict) and "response" in response_data:
-            response_text = response_data["response"].strip()
-            # Log the actual response we got
-            logging.info(f"Raw Ollama response text: {response_text[:100]}...")
-            
-            # Post-process using the PromptManager
-            response_text = PromptManager.post_process_response(response_text)
-            
-        else:
-            logging.error(f"Unexpected response format from Ollama: {response_data}")
-            response_text = PromptManager.get_fallback_response("error")
+        # Log the response and time
+        logging.info(f"Raw Ollama response text: {response_text[:100]}...")
+        logging.info(f"Ollama response time: {duration:.2f}s")
         
-        # Measure and log response time
-        elapsed = time.time() - start_time
-        logging.info(f"Ollama response time: {elapsed:.2f}s")
+        # Apply aggressive post-processing to eliminate analytical language
+        clean_response = PromptManager.post_process_response(response_text)
         
-        # Log prompt and response for debugging if verbose
-        if verbose:
-            PromptManager.log_prompt(full_prompt, response_text, elapsed)
+        return clean_response
         
-        return response_text
     except Exception as e:
-        logging.error(f"Error processing message with Ollama: {e}")
-        return PromptManager.get_fallback_response("error")
+        logging.error(f"Error in process_message: {e}")
+        return create_contextual_fallback(message)
+
+def create_contextual_fallback(message):
+    """Create context-specific fallback responses instead of generic ones."""
+    message_lower = message.lower()
+    
+    # Question patterns
+    if "what is" in message_lower or "who is" in message_lower or "how do" in message_lower:
+        if "dog" in message_lower:
+            return "A dog is a domesticated mammal, part of the wolf family. They're known for their loyalty, friendliness, and are often kept as pets!"
+        elif "cat" in message_lower:
+            return "Cats are small, furry mammals that people often keep as pets. They're independent, playful, and make great companions!"
+        elif "weather" in message_lower or "temperature" in message_lower:
+            return "I don't have access to real-time weather data, but I'm happy to chat about other things!"
+        elif "time" in message_lower:
+            return "I don't have access to the current time, but I can help with other questions!"
+        else:
+            return "That's an interesting question! Could you tell me more about what you'd like to know?"
+    
+    # Greeting patterns
+    elif any(word in message_lower for word in ["hello", "hi", "hey", "greetings"]):
+        return "Hey there! Great to hear from you. What's on your mind today?"
+    
+    # Information requests
+    elif any(word in message_lower for word in ["tell me", "explain", "describe"]):
+        return "I'd love to explain that! Could you tell me a bit more about what you're interested in?"
+    
+    # Default, still conversational
+    else:
+        return "I'm listening! What would you like to chat about?"
 
 def send_to_ollama(prompt, system_prompt=None):
     """
@@ -95,8 +141,8 @@ def send_to_ollama(prompt, system_prompt=None):
             return response.json()
         else:
             logging.error(f"Ollama API error: {response.status_code} - {response.text}")
-            return {"response": "I'm having trouble connecting to my thinking module."}
+            return {"response": create_contextual_fallback(prompt)}
             
     except Exception as e:
         logging.error(f"Error in send_to_ollama: {e}")
-        return {"response": "I encountered an error while processing your request."}
+        return {"response": create_contextual_fallback(prompt)}

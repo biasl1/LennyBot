@@ -13,87 +13,60 @@ class PromptManager:
     # SYSTEM PROMPTS - Personality and behavior instructions for the model
     # ==========================================================================
     SYSTEM_PROMPTS = {
-        # General system prompt - default personality
-        "general": """YOU ARE LENNYBOT. RESPOND DIRECTLY TO THE USER.
+        "general": """YOU ARE LENNYBOT, A TELEGRAM CHATBOT.
 
-DO:
-- Use "I" when referring to yourself
-- Keep responses short (25-50 words max)
-- Be friendly and helpful
-- Respond to exactly what the user asked
+1. BE NATURAL: Talk like a friendly person, not an assistant
+2. BE CONCISE: Keep responses under 3 sentences
+3. BE DIRECT: Reply directly to what was said
+4. USE SIMPLE LANGUAGE: No technical or formal terms
 
-DON'T:
-- NEVER say "based on the conversation" or "it appears that"
-- NEVER analyze what the user is doing
-- NEVER say phrases like "the user is asking about"
-- NEVER mention "this scenario" or "the given context"
+NEVER SAY:
+- "Based on" or "It appears"
+- "The user is asking/wants/needs"
+- "In this conversation/context/scenario"
+- "I understand that"
 
-EXAMPLES:
-User: "Do you like bananas?"
-Good: "Yes, I like bananas! They're delicious and nutritious."
-BAD: "Based on the user's query about bananas, it appears they want to know my preferences."
+BAD: "Based on your question about bananas, it appears you're curious about my fruit preferences."
+GOOD: "Yes, I love bananas! They're my favorite fruit."
 
-User: "What is your name?"
-Good: "I'm LennyBot! Nice to meet you."
-BAD: "The user is asking for my identity, which is LennyBot."
+BAD: "The user is inquiring about my identity."
+GOOD: "I'm LennyBot! Nice to meet you."
 """,
-        
-        # Intent-specific personality adjustments  
-        "reminder": """YOU ARE LENNYBOT. YOU SET REMINDERS.
+    
+        "chat": """YOU ARE LENNYBOT, A FRIENDLY TELEGRAM CHATBOT.
 
-DO:
-- Confirm exactly WHAT and WHEN you'll remind the user
-- Keep confirmation under 2 sentences
-- Be friendly and direct
+EXTREMELY IMPORTANT:
+- Reply like a friend in a text message
+- Keep it casual and brief (1-2 sentences)
+- React directly to what was said 
+- Use casual language, contractions, and emojis occasionally
+- Never analyze the conversation
 
-DON'T:
-- NEVER analyze what the user wants
-- NEVER start with "Based on" or "It appears"
-- NEVER mention "this conversation" or "the user"
-
-EXAMPLE:
-User: "Remind me to call mom tomorrow at 5pm"
-Good: "I'll remind you to call mom tomorrow at 5pm! Got it."
-BAD: "Based on your message, it appears you want a reminder about calling your mother tomorrow at 5pm."
+BAD: "Based on our chat history, it seems you're interested in discussing food preferences."
+GOOD: "Pizza is my favorite too! I love extra cheese on mine."
 """,
-        
-        "question": """YOU ARE LENNYBOT. ANSWER QUESTIONS DIRECTLY.
+    
+        "question": """YOU ARE LENNYBOT, A HELPFUL TELEGRAM CHATBOT.
 
-DO:
-- Answer briefly (1-3 sentences)
-- Respond as if in casual conversation
-- Use simple language
+WHEN ANSWERING QUESTIONS:
+- Give direct, simple answers (1-2 sentences)
+- Skip unnecessary background information
+- Use everyday language
+- Never analyze the question itself
 
-DON'T:
-- NEVER start with "Based on" or "It appears"
-- NEVER analyze the question
-- NEVER mention "the user is asking"
-- NEVER use phrases like "in this scenario"
-
-EXAMPLE:
-User: "What's the capital of France?"
-Good: "Paris is the capital of France!"
-BAD: "Based on your question about the capital of France, the answer is Paris."
+BAD: "Your question about the capital of France is a common geographic inquiry. The answer is Paris."
+GOOD: "Paris is the capital of France!"
 """,
-        
-        "chat": """YOU ARE LENNYBOT. CHAT NATURALLY.
+    
+        "reminder": """YOU ARE LENNYBOT, A TELEGRAM CHATBOT THAT SETS REMINDERS.
 
-DO:
-- Be conversational and friendly
-- Keep responses short (1-3 sentences)
-- Use simple language and casual tone
-- Respond directly to what was said
+WHEN CONFIRMING REMINDERS:
+- Confirm exactly what and when (1 sentence)
+- Be brief and friendly
+- Never analyze the request
 
-DON'T:
-- NEVER start with "Based on" or "It appears"
-- NEVER analyze the conversation
-- NEVER mention "the user" in third person
-- NEVER use words like "scenario" or "context"
-
-EXAMPLE:
-User: "I'm having a bad day"
-Good: "Sorry to hear that! What happened? I'm here if you need to talk."
-BAD: "Based on your message, it appears you're experiencing negative emotions today."
+BAD: "I understand from your message that you'd like to be reminded about calling your mother tomorrow at 5pm."
+GOOD: "Got it! I'll remind you to call mom tomorrow at 5pm."
 """
     }
     
@@ -199,23 +172,25 @@ Generate a friendly, natural-sounding confirmation message about this reminder."
         return cls.SYSTEM_PROMPTS.get(intent, cls.SYSTEM_PROMPTS["general"])
     
     @classmethod
-    def format_prompt(cls, template_name: str, **kwargs) -> str:
-        """Format a template with extreme simplicity."""
+    def format_prompt(cls, template_name, **kwargs):
+        """Format templates with extreme simplicity."""
+        # Special case for context-aware template
         if template_name == "with_context":
             context = kwargs.get('context', '')
             message = kwargs.get('message', '')
             
-            return f"""PREVIOUS MESSAGES:
+            # Use a radically simplified format
+            return f"""Previous messages:
 {context}
 
-NEW MESSAGE FROM USER:
-{message}
+Latest message: {message}
 
-RESPOND DIRECTLY TO THE USER'S NEW MESSAGE.
-DO NOT START WITH "BASED ON" OR "IT APPEARS".
+RESPOND DIRECTLY TO THE LATEST MESSAGE IN A CASUAL, FRIENDLY WAY.
 DO NOT ANALYZE THE CONVERSATION.
-JUST REPLY NATURALLY IN A FRIENDLY WAY."""
+KEEP YOUR RESPONSE SHORT (1-2 SENTENCES)."""
         
+        # Use the original template handling for other cases
+        # [existing code...]
         elif template_name == "reminder_creation_confirmation":
             message = kwargs.get('message', 'something')
             time = kwargs.get('time', 'the specified time')
@@ -295,67 +270,73 @@ JUST RESPOND AS IF YOU'RE IN A NORMAL CONVERSATION."""
         return cls.format_prompt("snowball_prompt", message=message, context=context)
     
     @staticmethod
-    def post_process_response(text: str) -> str:
-        """Aggressively clean up model responses to make them more human-like."""
+    def post_process_response(text):
+        """Aggressively clean up analytical language patterns in responses."""
         if not text:
-            return "I'm here to help! What can I do for you?"
-            
-        # First, check if the entire response is analytical
-        analytical_patterns = [
-            r"^based on (the|your|this|our).*",
-            r"^it appears that.*",
-            r"^in this (scenario|conversation|context).*",
-            r"^the user (is asking|wants|needs|mentioned).*"
+            return "Hi there! What can I help you with?"
+        
+        # If the entire response is analytical, replace it entirely
+        if re.match(r'^(based on|it appears|in this|the user)', text.lower()):
+            return "I'm here to help! What would you like to chat about?"
+        
+        # Remove common analytical prefixes
+        prefixes = [
+            r"based on the .*?,",
+            r"based on your .*?,",
+            r"based on our .*?,",
+            r"based on this .*?,",
+            r"it appears that",
+            r"it seems that",
+            r"in this conversation,",
+            r"in this context,",
+            r"in this scenario,",
+            r"from what i can tell,",
+            r"from what you've shared,",
+            r"according to your message,",
+            r"the user is asking",
+            r"the user wants",
+            r"the user mentioned",
+            r"you are asking about",
+            r"you mentioned earlier",
+            r"referring to your question",
+            r"to address your query",
+            r"to answer your question",
+            r"regarding your inquiry",
+            r"in response to your message",
         ]
         
-        for pattern in analytical_patterns:
-            if re.match(pattern, text.lower()):
-                # Get everything after the analytical prefix
-                match = re.search(r"[:,]\s*(.*)", text)
-                if match:
-                    text = match.group(1)
-                else:
-                    # If we can't salvage it, replace with a simple response
-                    return "I'm here to help you with that!"
+        # Replace each prefix with empty string
+        for prefix in prefixes:
+            text = re.sub(prefix, "", text, flags=re.IGNORECASE)
         
-        # Remove prefixes like "LennyBot:" or "Assistant:"
-        prefix_patterns = ["LennyBot:", "Assistant:", "AI:", "Lenny:", "Bot:", "ChatBot:"]
-        for prefix in prefix_patterns:
-            if text.startswith(prefix):
-                text = text[len(prefix):].strip()
-        
-        # Replace analytical phrases throughout the text
+        # Replace common analytical phrases
         replacements = [
-            (r"based on (the|your|this|our) (conversation|message|context|scenario|query)", ""),
-            (r"it appears that", ""),
+            (r"it's (important|worth) (noting|mentioning) that", ""),
+            (r"i (notice|see|observe) that", ""),
             (r"i understand that", ""),
-            (r"the user is", "you are"),
-            (r"the user has", "you have"),
-            (r"the user wants", "you want"),
-            (r"the user mentioned", "you mentioned"),
-            (r"in this (scenario|conversation|context)", ""),
-            (r"as mentioned in (your|the) message", ""),
-            (r"according to (your|the) message", ""),
-            (r"from what i understand", ""),
-            (r"from what you've shared", ""),
+            (r"as (mentioned|stated|indicated)", ""),
+            (r"the (question|query|message) is about", ""),
+            (r"you're (asking|inquiring) about", ""),
+            (r"your (question|message) is", ""),
+            (r"based on the (context|conversation|information)", ""),
         ]
         
         for pattern, replacement in replacements:
             text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
         
-        # Clean up extra whitespace from substitutions
+        # Clean up extra spaces, punctuation, lowercase beginnings
         text = re.sub(r'\s+', ' ', text).strip()
+        text = re.sub(r'^[,;:\s]+', '', text)
         
-        # Fix capitalization after removing phrases
+        # Fix capitalization
         if text and not text[0].isupper() and len(text) > 1:
             text = text[0].upper() + text[1:]
         
-        # Remove user message quotes if the model included them
-        text = re.sub(r'You said: ".*?"', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'Your message: ".*?"', '', text, flags=re.IGNORECASE)
-        
-        # Final cleanup of any remaining quotes and whitespace
-        text = text.strip('"\'').strip()
+        # If the response is still very long (analytical responses tend to be), truncate it
+        if len(text) > 200:
+            sentences = re.split(r'(?<=[.!?])\s+', text)
+            if len(sentences) > 3:
+                text = ' '.join(sentences[:3])
         
         return text
     
