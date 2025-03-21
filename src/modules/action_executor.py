@@ -5,14 +5,82 @@ import time
 from telegram import Update
 from telegram.ext import ContextTypes
 from modules import ollama_service
-from modules.conversation_context import get_time_window_context, enhance_with_knowledge
 from modules.user_interaction import update_conversation_state, get_conversation_state
 from modules.database import get_history_collection, get_reminder_collection
 from modules.time_extractor import extract_time
 # Add missing import
 import uuid
+# Add to imports
+from modules.meta_context import get_meta_context
+
+# Implement enhance_with_knowledge function directly in this file
+def enhance_with_knowledge(prompt, chat_id):
+    """Enhance a prompt with relevant knowledge from the knowledge store."""
+    try:
+        from modules.knowledge_store import KnowledgeStore
+        knowledge_store = KnowledgeStore()
+        
+        # Extract key terms from the prompt
+        import re
+        search_terms = [term for term in re.findall(r'\b\w{3,}\b', prompt.lower()) 
+                      if term not in ["the", "and", "for", "that", "this", "with", "you", "what", "how", "when"]]
+        
+        # Use top 5 most relevant terms for search
+        if search_terms:
+            search_query = " ".join(search_terms[:5])
+            results = knowledge_store.search_knowledge(search_query, limit=1)
+            
+            # Add knowledge to prompt if found
+            if results and len(results) > 0:
+                knowledge_text = results[0].get("content", "")
+                prompt += f"\n\nRELEVANT KNOWLEDGE:\n{knowledge_text}\n"
+                
+                # Log the knowledge enhancement
+                get_meta_context().log_event("action", "knowledge_enhanced", {
+                    "timestamp": time.time(),
+                    "chat_id": chat_id,
+                    "search_terms": search_terms[:5],
+                    "knowledge_id": results[0].get("id", "unknown")
+                })
+        
+        return prompt
+    except Exception as e:
+        logging.error(f"Error enhancing with knowledge: {e}")
+        return prompt  # Return original prompt on error
 
 async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action: dict):
+    # Extract existing variables
+    chat_id = update.effective_chat.id
+    user_name = update.effective_user.first_name
+    message = action.get("original_message", "")
+    
+    # Get meta-context
+    meta_context = get_meta_context()
+    
+    # Handle time-related questions better
+    if action.get("intent") == "question" and any(word in message.lower() 
+                                               for word in ["time", "clock", "hour", "date", "day", "today"]):
+        from modules.time_extractor import get_current_time_formatted
+        current_time = get_current_time_formatted()
+        
+        # Fix placeholder text in responses
+        if "[insert" in action.get("response_plan", "") or "current time" in action.get("response_plan", ""):
+            action["response_plan"] = f"It's currently {current_time}."
+        else:
+            # Add time information to existing response
+            action["response_plan"] = f"{action.get('response_plan', '').strip()} (Current time: {current_time})"
+        
+        # Log specialized response
+        meta_context.log_event("action", "time_response", {
+            "timestamp": time.time(),
+            "chat_id": chat_id,
+            "time_provided": current_time
+        })
+        
+    # Extract chat_id first, before using it
+    chat_id = update.effective_chat.id
+    context_str = meta_context.get_unified_context(chat_id, minutes=10)
+
     # Get collections from database module
     history_collection = get_history_collection()
     reminder_collection = get_reminder_collection()
@@ -24,6 +92,14 @@ async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, act
         user_name = update.effective_user.first_name
         chat_id = update.effective_chat.id
         timestamp = time.time()
+        
+        # Log action execution start
+        meta_context.log_event("action", "action_execution_started", {
+            "timestamp": timestamp,
+            "chat_id": chat_id,
+            "intent": intent,
+            "user_name": user_name
+        })
         
         # Generate unique ID for this interaction
         unique_id = f"pin-{chat_id}-{int(timestamp)}"
@@ -139,7 +215,7 @@ async def execute_action(update: Update, context: ContextTypes.DEFAULT_TYPE, act
             # Fallback to traditional method
             # Get recent conversation context
             try:
-                recent_context = get_time_window_context(chat_id, minutes=10)
+                recent_context = get_meta_context().get_unified_context(chat_id, minutes=10)
             except Exception as e:
                 logging.error(f"Error retrieving context: {e}")
                 recent_context = "No recent context available."
@@ -160,7 +236,7 @@ USER MESSAGE: {action['original_message']}
 Based on this context and system state, provide a helpful response. If the conversation has multiple turns, ensure continuity.
 """
             
-            # Enhance with knowledge
+            # Enhance with knowledge using our local function
             prompt = enhance_with_knowledge(prompt, chat_id)
             
             # Get response with safeguards
@@ -173,6 +249,14 @@ Based on this context and system state, provide a helpful response. If the conve
         # Send response
         await update.message.reply_text(response)
         logging.info(f"Response sent: {response[:30]}...")
+        
+        # Log the response to meta-context
+        meta_context.log_event("action", "message_sent", {
+            "timestamp": time.time(),
+            "chat_id": chat_id,
+            "message": response[:100],  # Log first 100 chars
+            "intent": intent
+        })
         
         # Store bot's response in conversation history
         try:
@@ -189,12 +273,19 @@ Based on this context and system state, provide a helpful response. If the conve
             logging.error(f"Error storing bot response in history: {e}")
         
     except Exception as e:
+        # Log the error to meta-context
+        meta_context.log_event("action", "action_execution_error", {
+            "timestamp": time.time(),
+            "chat_id": chat_id if 'chat_id' in locals() else "unknown",
+            "error": str(e)
+        })
+        
         logging.error(f"Error in execute_action: {e}", exc_info=True)
         # Always send a valid fallback
         await update.message.reply_text("I'm having trouble processing that. Let me know if you'd like to try again.")
 
     # Get the context
-    recent_context = get_time_window_context(chat_id, minutes=10)
+    recent_context = meta_context.get_unified_context(chat_id, minutes=10)
     
     # Log the context (for debugging)
     logging.debug(f"CONTEXT WINDOW for {chat_id}:\n{recent_context}")

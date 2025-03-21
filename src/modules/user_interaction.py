@@ -18,13 +18,18 @@ def update_conversation_state(chat_id, intent, details=None, increment_turn=Fals
         active_conversations[chat_id] = {
             "current_intent": None,
             "turns": 0,
-            "last_update": time.time(),
-            "details": {}
+            "details": {},
+            "last_update": time.time()
         }
     
     if intent is None:
-        # Reset conversation
-        active_conversations.pop(chat_id, None)
+        # Reset the conversation
+        active_conversations[chat_id] = {
+            "current_intent": None,
+            "turns": 0,
+            "details": {},
+            "last_update": time.time()
+        }
         return
     
     # Update the conversation state
@@ -35,14 +40,15 @@ def update_conversation_state(chat_id, intent, details=None, increment_turn=Fals
     if details:
         current_details.update(details)
     
-    active_conversations[chat_id] = {
-        "current_intent": intent,
-        "turns": state["turns"] + (1 if increment_turn else 0),
-        "last_update": time.time(),
-        "details": current_details
-    }
+    # Update state
+    state["current_intent"] = intent
+    state["last_update"] = time.time()
+    state["details"] = current_details
     
-    logging.info(f"Updated conversation state for {chat_id}: intent={intent}, turns={active_conversations[chat_id]['turns']}, details={current_details}")
+    if increment_turn:
+        state["turns"] = state.get("turns", 0) + 1
+    
+    logging.info(f"Updated conversation state for {chat_id}: intent={intent}, turns={state['turns']}, details={current_details}")
     
 def get_conversation_state(chat_id):
     """Get the current conversation state."""

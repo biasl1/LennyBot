@@ -1,12 +1,14 @@
 import logging
 import time
 import re
+import uuid
 import datetime
 from typing import Tuple, Dict, Any, Optional
 
 from modules.database import get_reminder_collection
 from modules.time_extractor import extract_time
 from modules.user_interaction import update_conversation_state, get_conversation_state
+from modules.meta_context import get_meta_context
 
 reminder_collection = get_reminder_collection()
 
@@ -103,13 +105,34 @@ def create_reminder(decision: Dict[str, Any]) -> Tuple[bool, str]:
     Returns (success, message) tuple.
     """
     if not decision.get("ready_to_create", False):
-        missing = []
-        if "time_info" not in decision:
-            missing.append("time")
-        if "reminder_message" not in decision:
-            missing.append("message")
+        # If not ready, try to extract time from the message
+        message = decision.get("original_message", "")
+        timestamp = decision.get("timestamp", time.time())
         
-        return False, f"Can't create reminder yet. Missing: {', '.join(missing)}"
+        # Check for basic time patterns
+        if "in" in message.lower() and any(word in message.lower() for word in ["minute", "min", "hour", "day"]):
+            # Extract time using time_extractor
+            due_time, time_str = extract_time(message, timestamp)
+            decision["due_time"] = due_time
+            decision["time_str"] = time_str
+            
+            # Extract reminder text by removing time references
+            content = re.sub(r'\bremind me\b|\breminder\b|\bin\b.*|\bminute[s]?\b.*|\bhour[s]?\b.*|\bday[s]?\b.*', '', message, flags=re.IGNORECASE)
+            content = content.strip()
+            
+            if content and len(content) > 2:
+                decision["reminder_message"] = content
+                decision["ready_to_create"] = True
+        
+        # If still not ready, report what's missing
+        if not decision.get("ready_to_create", False):
+            missing = []
+            if "time_info" not in decision and "due_time" not in decision:
+                missing.append("time")
+            if "reminder_message" not in decision:
+                missing.append("message")
+            
+            return False, f"Can't create reminder yet. Missing: {', '.join(missing)}"
     
     chat_id = decision.get("user_id")
     user_name = decision.get("user_name", "User")
@@ -149,8 +172,68 @@ def create_reminder(decision: Dict[str, Any]) -> Tuple[bool, str]:
         # Reset the conversation state since we're done with this reminder
         update_conversation_state(chat_id, None)
         
+        # Log to meta-context
+        meta_context = get_meta_context()
+        meta_context.log_event("reminder", "reminder_created", {
+            "timestamp": timestamp,
+            "chat_id": chat_id,
+            "message": reminder_message,
+            "due_at": due_time,
+            "time_str": time_str,
+            "reminder_id": reminder_id
+        })
+        
         return True, f"✅ I'll remind you about '{reminder_message}' {time_phrase}."
     
     except Exception as e:
         logging.error(f"Error creating reminder: {e}")
         return False, "I had trouble setting that reminder. Please try again."
+
+def check_due_reminders():
+    """Check for reminders that are due and return them."""
+    current_time = time.time()
+    
+    try:
+        # Query for due reminders
+        results = reminder_collection.get(
+            where={"completed": "false"},
+            include=["metadatas", "documents"]
+        )
+        
+        due_reminders = []
+        
+        if results and results.get('ids'):
+            for i, reminder_id in enumerate(results['ids']):
+                metadata = results['metadatas'][i]
+                message = results['documents'][i]
+                
+                # Check if due (convert string to float)
+                due_at = float(metadata.get('due_at', 0))
+                if due_at <= current_time:
+                    due_reminders.append({
+                        'id': reminder_id,
+                        'chat_id': metadata.get('chat_id'),
+                        'message': message,
+                        'user_name': metadata.get('user_name', 'User')
+                    })
+                    
+                    # Mark as completed
+                    reminder_collection.update(
+                        ids=[reminder_id],
+                        metadatas=[{**metadata, "completed": "true"}]
+                    )
+                    
+                    # Log to meta-context
+                    meta_context = get_meta_context()
+                    meta_context.log_event("reminder", "reminder_triggered", {
+                        "timestamp": current_time,
+                        "chat_id": metadata.get('chat_id'),
+                        "message": message,
+                        "reminder_id": reminder_id
+                    })
+        
+        return due_reminders
+    
+    except Exception as e:
+        logging.error(f"Error checking due reminders: {e}")
+        return []

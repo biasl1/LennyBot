@@ -73,3 +73,17 @@ def parse_clock_time(match, base_timestamp):
         target_dt += datetime.timedelta(days=1)
     
     return target_dt.timestamp()
+
+def get_current_time_formatted():
+    """Return the current time in a nicely formatted way."""
+    now = datetime.now()
+    
+    # Format: "3:45 PM, Tuesday, March 21, 2025"
+    time_str = now.strftime("%I:%M %p, %A, %B %d, %Y")
+    
+    # Remove leading zero from hour if present
+    if time_str.startswith("0"):
+        time_str = time_str[1:]
+        
+    return time_str
+

@@ -3,32 +3,28 @@ import os
 import sys
 import asyncio
 import threading
+import time
 from telegram import Update
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from modules.reminder_scheduler import ReminderScheduler
-import time
-from modules.conversation_context import get_time_window_context, get_recent_context
-from modules.knowledge_store import KnowledgeStore
-
 
 # Setup paths and imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 
+from modules.knowledge_store import KnowledgeStore
+from modules.meta_context import get_meta_context
+from modules.context_scheduler import get_context_scheduler
 from modules.user_interaction import store_pin
 from modules.decision_agent import decide_action
 from modules.action_executor import execute_action
 
-active_conversations = {}  # Track active conversations by chat_id
-
-
 # Global variables
 application = None
-reminder_scheduler = None
 
 # Configure logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 # Define the command and message handlers
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -47,12 +43,26 @@ Just chat with me naturally!
 """
     await update.message.reply_text(help_text)
 
+
+# Update handle_message
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process incoming message and respond using our decision pipeline."""
+    """Process incoming message with meta-context logging."""
     user_message = update.message.text
     user_name = update.effective_user.first_name
     chat_id = update.message.chat_id
-
+    timestamp = time.time()
+    
+    # Get meta-context
+    meta_context = get_meta_context()
+    
+    # Log the incoming message
+    meta_context.log_event("telegram", "message_received", {
+        "timestamp": timestamp,
+        "chat_id": chat_id,
+        "user_name": user_name,
+        "message": user_message
+    })
+    
     logger.info(f"Received message from {user_name}: {user_message}")
 
     # Store the pin
@@ -60,28 +70,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Decide on the action
     action = decide_action(pin)
+    
+    # Log the decision
+    meta_context.log_event("decision", "intent_decided", {
+        "timestamp": time.time(),
+        "chat_id": chat_id,
+        "intent": action.get("intent", "unknown"),
+        "confidence": action.get("confidence", 0),
+        "user_name": user_name
+    })
 
     # Execute the action (send the response)
     await execute_action(update, context, action)
+    
+    # Log completion
+    meta_context.log_event("telegram", "message_processed", {
+        "timestamp": time.time(),
+        "chat_id": chat_id,
+        "processing_time": time.time() - timestamp
+    })
 
 # This function will be called by the application once it's running
 async def post_init(application: Application):
-    """Initialize the reminder scheduler after the application has started."""
-    global reminder_scheduler
-    
-    # Create reminder scheduler
-    reminder_scheduler = ReminderScheduler(application.bot)
-    logging.info("Created new reminder scheduler")
+    """Initialize the context scheduler after the application has started."""
+    # Create and start the context scheduler
+    context_scheduler = get_context_scheduler(application.bot)
+    logging.info("Created new context scheduler")
     
     # Start the scheduler
-    await reminder_scheduler.start()
-    logging.info("Reminder scheduler started successfully!")
+    context_scheduler.start()
+    logging.info("Context scheduler started successfully!")
+    
+    # Log this event
+    get_meta_context().log_event("system", "scheduler_started", {
+        "timestamp": time.time(),
+        "type": "context_scheduler"
+    })
+
 async def context_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Display the current conversation context window."""
     chat_id = update.message.chat_id
     
     # Get the time window context (last 10 minutes)
-    context_text = get_time_window_context(chat_id, minutes=10)
+    context_text = get_meta_context().get_unified_context(chat_id, minutes=10)
     
     # Format for display
     response = "🔍 *Your Current Conversation Context:*\n\n"
@@ -254,12 +285,7 @@ def setup_telegram_bot():
     )
     
     # Add handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(CommandHandler("context", context_command))
-    application.add_handler(CommandHandler("status", status_command))
-
+    init_handlers(application)    
     return application
 
 
@@ -275,5 +301,8 @@ def start_telegram_bot():
     else:
         logging.error("Failed to start Telegram bot.")
 
-
-        
+# Add this function
+def get_bot():
+    """Get the Telegram bot instance."""
+    global application
+    return application.bot if application else None

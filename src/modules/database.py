@@ -70,7 +70,9 @@ def get_topics_collection():
     except Exception as e:
         logging.error(f"Error getting topics collection: {e}")
         return None
-    
+def get_db_client():
+    """Get the ChromaDB client."""
+    return chroma_client
     
 # Accessor functions
 def get_history_collection():

@@ -44,14 +44,24 @@ from config import Config
 print(f"[{time.time() - start_time:.2f}s] Config imported")
 print(f"Telegram token from Config: {Config.TELEGRAM_API_TOKEN}")
 
-# Import conversation_context without using signals
-print(f"[{time.time() - start_time:.2f}s] Importing conversation_context...")
+# Import meta_context without using signals
+print(f"[{time.time() - start_time:.2f}s] Importing meta_context...")
 try:
-    from modules.conversation_context import import_logs_to_history
-    print(f"[{time.time() - start_time:.2f}s] conversation_context imported")
+    from modules.meta_context import import_logs_to_history, get_meta_context
+    from modules.context_scheduler import get_context_scheduler
+    
+    # Initialize meta-context
+    meta_context = get_meta_context()
+    meta_context.log_event("system", "bot_initialized", {
+        "timestamp": time.time(),
+        "startup_time": time.time() - start_time,
+        "version": "1.0.0",
+        "environment": os.environ.get("ENVIRONMENT", "development")
+    })
+    print(f"[{time.time() - start_time:.2f}s] Meta-context system initialized")
+    print(f"[{time.time() - start_time:.2f}s] meta_context imported")
 except Exception as e:
-    print(f"Error importing conversation_context: {e}")
-    # Continue anyway
+    print(f"Error initializing meta-context: {e}")
 
 # Try to import logs without signal timeouts
 print(f"[{time.time() - start_time:.2f}s] Importing logs...")
@@ -65,7 +75,8 @@ except Exception as e:
 # Import the telegram service without signal timeouts
 print(f"[{time.time() - start_time:.2f}s] Importing telegram_service...")
 try:
-    from modules.telegram_service import start_telegram_bot
+    from modules.telegram_service import start_telegram_bot, setup_telegram_bot
+    setup_telegram_bot()
     print(f"[{time.time() - start_time:.2f}s] telegram_service imported")
 except Exception as e:
     print(f"Error importing telegram_service: {e}")
