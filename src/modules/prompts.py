@@ -14,48 +14,87 @@ class PromptManager:
     # ==========================================================================
     SYSTEM_PROMPTS = {
         # General system prompt - default personality
-        "general": """You are LennyBot, a helpful and friendly Telegram assistant.
-Respond directly to users in a natural, conversational way.
-Don't use prefixes like 'LennyBot:' or formatting markers.
-Keep responses brief, helpful and human-like.
-Be conversational but concise.""",
-            
-        # Intent-specific personality adjustments
-        "reminder": """You are LennyBot, a helpful assistant specialized in managing reminders.
-Focus on extracting time information and reminder content accurately.
-Respond naturally and confirm the details you've understood.
-When setting reminders, clearly repeat back the time and task to confirm.
-If time is ambiguous, ask for clarification.""",
-            
-        "question": """You are LennyBot, a knowledgeable assistant.
-Provide accurate, clear answers to questions.
-When unsure, admit limitations rather than making up information.
-Keep responses concise and informative.
-If given knowledge to reference, incorporate it naturally without mentioning the source.""",
-            
-        "chat": """You are LennyBot, a friendly conversational assistant.
-Engage in natural dialogue, showing personality but remaining concise.
-Respond directly to the user's statements or questions.
-Keep the conversation flowing naturally and show empathy where appropriate.
-Remember details the user has shared previously.""",
-            
-        # Special purpose prompts
-        "time_aware": """You are LennyBot, a helpful assistant with time awareness.
-Include the provided time information in your response when relevant.
-Be precise and helpful when discussing time-related information.
-Format times in a user-friendly way.""",
-            
-        "knowledge_enhanced": """You are LennyBot, a knowledgeable assistant.
-Use the provided knowledge to inform your response.
-Incorporate this information naturally without explicitly mentioning that you were given additional context.
-If the knowledge conflicts with the user's statement, gently correct them while being respectful.""",
-            
-        "decision": """You are LennyBot's decision component.
-Analyze the user's message carefully to determine:
-1. The underlying intent (reminder, question, chat)
-2. Any specific actions that need to be taken
-3. Relevant details needed for those actions
-Be precise in your classification but don't explain your reasoning."""
+        "general": """YOU ARE LENNYBOT. RESPOND DIRECTLY TO THE USER.
+
+DO:
+- Use "I" when referring to yourself
+- Keep responses short (25-50 words max)
+- Be friendly and helpful
+- Respond to exactly what the user asked
+
+DON'T:
+- NEVER say "based on the conversation" or "it appears that"
+- NEVER analyze what the user is doing
+- NEVER say phrases like "the user is asking about"
+- NEVER mention "this scenario" or "the given context"
+
+EXAMPLES:
+User: "Do you like bananas?"
+Good: "Yes, I like bananas! They're delicious and nutritious."
+BAD: "Based on the user's query about bananas, it appears they want to know my preferences."
+
+User: "What is your name?"
+Good: "I'm LennyBot! Nice to meet you."
+BAD: "The user is asking for my identity, which is LennyBot."
+""",
+        
+        # Intent-specific personality adjustments  
+        "reminder": """YOU ARE LENNYBOT. YOU SET REMINDERS.
+
+DO:
+- Confirm exactly WHAT and WHEN you'll remind the user
+- Keep confirmation under 2 sentences
+- Be friendly and direct
+
+DON'T:
+- NEVER analyze what the user wants
+- NEVER start with "Based on" or "It appears"
+- NEVER mention "this conversation" or "the user"
+
+EXAMPLE:
+User: "Remind me to call mom tomorrow at 5pm"
+Good: "I'll remind you to call mom tomorrow at 5pm! Got it."
+BAD: "Based on your message, it appears you want a reminder about calling your mother tomorrow at 5pm."
+""",
+        
+        "question": """YOU ARE LENNYBOT. ANSWER QUESTIONS DIRECTLY.
+
+DO:
+- Answer briefly (1-3 sentences)
+- Respond as if in casual conversation
+- Use simple language
+
+DON'T:
+- NEVER start with "Based on" or "It appears"
+- NEVER analyze the question
+- NEVER mention "the user is asking"
+- NEVER use phrases like "in this scenario"
+
+EXAMPLE:
+User: "What's the capital of France?"
+Good: "Paris is the capital of France!"
+BAD: "Based on your question about the capital of France, the answer is Paris."
+""",
+        
+        "chat": """YOU ARE LENNYBOT. CHAT NATURALLY.
+
+DO:
+- Be conversational and friendly
+- Keep responses short (1-3 sentences)
+- Use simple language and casual tone
+- Respond directly to what was said
+
+DON'T:
+- NEVER start with "Based on" or "It appears"
+- NEVER analyze the conversation
+- NEVER mention "the user" in third person
+- NEVER use words like "scenario" or "context"
+
+EXAMPLE:
+User: "I'm having a bad day"
+Good: "Sorry to hear that! What happened? I'm here if you need to talk."
+BAD: "Based on your message, it appears you're experiencing negative emotions today."
+"""
     }
     
     # ==========================================================================
@@ -161,16 +200,40 @@ Generate a friendly, natural-sounding confirmation message about this reminder."
     
     @classmethod
     def format_prompt(cls, template_name: str, **kwargs) -> str:
-        """Format a template with the provided variables."""
+        """Format a template with extreme simplicity."""
+        if template_name == "with_context":
+            context = kwargs.get('context', '')
+            message = kwargs.get('message', '')
+            
+            return f"""PREVIOUS MESSAGES:
+{context}
+
+NEW MESSAGE FROM USER:
+{message}
+
+RESPOND DIRECTLY TO THE USER'S NEW MESSAGE.
+DO NOT START WITH "BASED ON" OR "IT APPEARS".
+DO NOT ANALYZE THE CONVERSATION.
+JUST REPLY NATURALLY IN A FRIENDLY WAY."""
+        
+        elif template_name == "reminder_creation_confirmation":
+            message = kwargs.get('message', 'something')
+            time = kwargs.get('time', 'the specified time')
+            
+            return f"""User wants reminder: "{message}" at {time}
+
+Confirm this reminder in 1-2 friendly sentences. 
+DO NOT analyze their request - just confirm you'll remind them.
+DO NOT start with "Based on" or "It appears"."""
+        
+        # Use default template handling for other cases
         template = cls.TEMPLATES.get(template_name)
         if not template:
-            logging.warning(f"Template '{template_name}' not found, using raw message")
             return kwargs.get("message", "")
         
         try:
             return template.format(**kwargs)
         except KeyError as e:
-            logging.error(f"Missing key in template '{template_name}': {e}")
             return kwargs.get("message", "")
     
     @classmethod
@@ -202,13 +265,24 @@ Generate a friendly, natural-sounding confirmation message about this reminder."
     
     @classmethod
     def create_batch_prompt(cls, messages: List[str], time_gap: float = 0.0) -> str:
-        """Create a prompt for batch message processing."""
-        combined_text = "\n".join(messages)
+        """Create a simple, direct prompt for batch message processing."""
+        if not messages:
+            return ""
         
-        if len(messages) > 1:
-            return cls.format_prompt("batch_messages", messages=combined_text)
-        else:
-            return combined_text
+        if len(messages) == 1:
+            return messages[0]
+        
+        # For multiple messages, make it ultra-explicit
+        combined = "\n".join([f"Message: {msg}" for msg in messages])
+    
+        return f"""MESSAGES FROM USER:
+{combined}
+
+RESPOND DIRECTLY TO THESE MESSAGES.
+IMPORTANT: DO NOT ANALYZE THESE MESSAGES, JUST REPLY TO THEM.
+DO NOT START WITH "BASED ON" OR "IT APPEARS".
+DO NOT MENTION "THE USER" OR "THESE MESSAGES".
+JUST RESPOND AS IF YOU'RE IN A NORMAL CONVERSATION."""
     
     @classmethod
     def create_reminder_prompt(cls, message: str) -> str:
@@ -222,38 +296,68 @@ Generate a friendly, natural-sounding confirmation message about this reminder."
     
     @staticmethod
     def post_process_response(text: str) -> str:
-        """Clean up model responses to make them more human-like."""
+        """Aggressively clean up model responses to make them more human-like."""
         if not text:
-            return ""
+            return "I'm here to help! What can I do for you?"
             
-        # Remove "LennyBot:" prefix if present
-        if text.startswith("LennyBot:"):
-            text = text[len("LennyBot:"):].strip()
+        # First, check if the entire response is analytical
+        analytical_patterns = [
+            r"^based on (the|your|this|our).*",
+            r"^it appears that.*",
+            r"^in this (scenario|conversation|context).*",
+            r"^the user (is asking|wants|needs|mentioned).*"
+        ]
         
-        # Remove any other response pattern like "Assistant:" or "AI:"
-        patterns = ["Assistant:", "AI:", "Lenny:", "Bot:", "ChatBot:"]
-        for pattern in patterns:
-            if text.startswith(pattern):
-                text = text[len(pattern):].strip()
+        for pattern in analytical_patterns:
+            if re.match(pattern, text.lower()):
+                # Get everything after the analytical prefix
+                match = re.search(r"[:,]\s*(.*)", text)
+                if match:
+                    text = match.group(1)
+                else:
+                    # If we can't salvage it, replace with a simple response
+                    return "I'm here to help you with that!"
         
-        # Remove conversation format if model generated both sides
-        lines = text.split('\n')
-        cleaned_lines = []
-        for line in lines:
-            # Skip lines that look like user messages
-            if any(line.strip().startswith(prefix) for prefix in ["User:", "Human:", "You:"]):
-                continue
-            # Remove assistant prefixes within lines
-            for prefix in patterns:
-                if prefix in line:
-                    line = line.replace(prefix, "")
-            cleaned_lines.append(line)
+        # Remove prefixes like "LennyBot:" or "Assistant:"
+        prefix_patterns = ["LennyBot:", "Assistant:", "AI:", "Lenny:", "Bot:", "ChatBot:"]
+        for prefix in prefix_patterns:
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
         
-        # Rejoin and clean up extra whitespace
-        text = '\n'.join(cleaned_lines)
-        text = re.sub(r'\n{3,}', '\n\n', text)  # Replace excessive newlines
+        # Replace analytical phrases throughout the text
+        replacements = [
+            (r"based on (the|your|this|our) (conversation|message|context|scenario|query)", ""),
+            (r"it appears that", ""),
+            (r"i understand that", ""),
+            (r"the user is", "you are"),
+            (r"the user has", "you have"),
+            (r"the user wants", "you want"),
+            (r"the user mentioned", "you mentioned"),
+            (r"in this (scenario|conversation|context)", ""),
+            (r"as mentioned in (your|the) message", ""),
+            (r"according to (your|the) message", ""),
+            (r"from what i understand", ""),
+            (r"from what you've shared", ""),
+        ]
         
-        return text.strip()
+        for pattern, replacement in replacements:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        
+        # Clean up extra whitespace from substitutions
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        # Fix capitalization after removing phrases
+        if text and not text[0].isupper() and len(text) > 1:
+            text = text[0].upper() + text[1:]
+        
+        # Remove user message quotes if the model included them
+        text = re.sub(r'You said: ".*?"', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'Your message: ".*?"', '', text, flags=re.IGNORECASE)
+        
+        # Final cleanup of any remaining quotes and whitespace
+        text = text.strip('"\'').strip()
+        
+        return text
     
     @classmethod
     def get_fallback_response(cls, intent: str = "general") -> str:
