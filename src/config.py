@@ -15,3 +15,4 @@ class Config:
 
     # ChromaDB settings
     CHROMADB_PATH = os.getenv("CHROMADB_PATH", "./chromadb")
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")

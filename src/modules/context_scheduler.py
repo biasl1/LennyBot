@@ -223,7 +223,7 @@ class ContextScheduler:
         except Exception as e:
             logging.error(f"Error sending Telegram message: {e}")
             
-    def _check_pending_pins(self, current_time: float):
+    def _check_pending_pins(self, current_time=None):
         """Check for pins that need responses with batching by time proximity."""
         try:
             # Look for pending pins in meta-context
@@ -244,16 +244,16 @@ class ContextScheduler:
                 metadata = pending_pins['metadatas'][i]
                 message = pending_pins['documents'][i]
                 chat_id = metadata.get('chat_id', 'unknown')
-                timestamp = float(metadata.get('timestamp', 0))
-                
+                if chat_id == 'unknown':
+                    continue
+                    
                 if chat_id not in messages_by_chat:
                     messages_by_chat[chat_id] = []
                     
                 messages_by_chat[chat_id].append({
-                    'pin_id': pin_id,
-                    'message': message,
+                    'id': pin_id,
                     'metadata': metadata,
-                    'timestamp': timestamp
+                    'message': message
                 })
             
             # For each chat, group messages by time proximity (5 minute window)
@@ -261,249 +261,153 @@ class ContextScheduler:
             conversation_batches = {}
             
             for chat_id, messages in messages_by_chat.items():
-                if chat_id == 'unknown' or not chat_id.isdigit():
-                    continue
-                    
-                # Sort messages by timestamp
-                sorted_messages = sorted(messages, key=lambda x: x['timestamp'])
+                batches = {}
+                batch_id = 0
                 
-                # Group into conversation batches
-                if len(sorted_messages) > 0:
-                    batch_id = 0
-                    conversation_batches[chat_id] = {}
-                    conversation_batches[chat_id][batch_id] = [sorted_messages[0]]
+                # Sort messages by timestamp
+                messages.sort(key=lambda m: int(m['metadata'].get('timestamp', 0)))
+                
+                # Group by time proximity
+                for msg in messages:
+                    timestamp = int(msg['metadata'].get('timestamp', 0))
                     
-                    # Group subsequent messages based on time proximity
-                    for i in range(1, len(sorted_messages)):
-                        curr_msg = sorted_messages[i]
-                        prev_msg = sorted_messages[i-1]
+                    if not batches:
+                        # First message creates first batch
+                        batches[batch_id] = [msg]
+                    else:
+                        # Check if close to previous batch
+                        last_batch = batches[max(batches.keys())]
+                        last_msg = last_batch[-1]
+                        last_time = int(last_msg['metadata'].get('timestamp', 0))
                         
-                        # If this message is within MAX_TIME_GAP of the previous one, add to current batch
-                        if curr_msg['timestamp'] - prev_msg['timestamp'] <= MAX_TIME_GAP:
-                            conversation_batches[chat_id][batch_id].append(curr_msg)
+                        if timestamp - last_time <= MAX_TIME_GAP:
+                            # Add to existing batch
+                            batches[max(batches.keys())].append(msg)
                         else:
-                            # Start a new batch
+                            # Create new batch
                             batch_id += 1
-                            conversation_batches[chat_id][batch_id] = [curr_msg]
-                    
-                    for batch_id, batch in conversation_batches[chat_id].items():
-                        for msg in batch:
-                            logging.info(f"Found pending pin: {msg['pin_id']} for chat {chat_id} in batch {batch_id}")
+                            batches[batch_id] = [msg]
+                
+                conversation_batches[chat_id] = batches
             
             # Process each conversation batch
             total_batches_processed = 0
             
             for chat_id, batches in conversation_batches.items():
+                chat_id = int(chat_id)  # Convert to int for Telegram
+                
                 for batch_id, messages in batches.items():
+                    # Skip empty batches
+                    if not messages:
+                        continue
+                        
+                    # Get time gap between first and last message
+                    if len(messages) > 1:
+                        first_time = int(messages[0]['metadata'].get('timestamp', 0))
+                        last_time = int(messages[-1]['metadata'].get('timestamp', 0))
+                        time_gap = last_time - first_time
+                    else:
+                        time_gap = 0.0
+                    
+                    logging.info(f"Processing batch {batch_id} for chat {chat_id} with {len(messages)} messages over {time_gap}s")
+                    
                     try:
-                        # Only process if there are messages
-                        if len(messages) == 0:
-                            continue
-                            
                         # Get message texts
                         message_texts = [msg['message'] for msg in messages]
+                        combined_text = " ".join(message_texts)
                         
-                        # Get the time range for this batch
-                        start_time = min([msg['timestamp'] for msg in messages])
-                        end_time = max([msg['timestamp'] for msg in messages])
-                        time_range = end_time - start_time
-                        
-                        logging.info(f"Processing batch {batch_id} for chat {chat_id} with {len(messages)} messages over {time_range:.1f}s")
-                        
-                        # Intent classification
+                        # Classify the batch intent
                         from modules.intent_classifier import classify_intent
-                        intent, confidence = classify_intent("\n".join(message_texts))
+                        intent, confidence = classify_intent(combined_text)
+                        
                         logging.info(f"Classified batch {batch_id} as intent '{intent}' with confidence {confidence}")
                         
-                        # Special handling for reminder intent
-                        if intent == "reminder":
-                            from modules.reminder_handler import process_reminder_intent, create_reminder
+                        # Get recent conversation context (last 10 messages)
+                        context_messages = self._get_context_messages(chat_id, 10)
+                        logging.info(f"Found {len(context_messages)} previous messages for context")
+                        
+                        # For action intents, check if there's a time component
+                        time_info = None
+                        if intent == 'action' or intent == 'reminder':
+                            try:
+                                # Import here to avoid circular imports
+                                from modules.time_extractor import extract_time
+                                time_info = extract_time(combined_text)
+                                logging.info(f"Extracted time info: {time_info}")
+                            except Exception as e:
+                                logging.error(f"Error extracting time: {e}")
+                                time_info = None
+                        
+                        # Process the message based on intent
+                        if intent == 'reminder' or (intent == 'action' and time_info is not None):
+                            # Handle reminder creation
+                            from modules.reminder_handler import process_reminder_intent
                             
-                            # Process each message in the batch as a reminder
-                            for msg in messages:
-                                user_name = msg['metadata'].get('user_name', 'User')
-                                int_chat_id = int(chat_id)
-                                
-                                # Process the reminder intent
-                                decision = process_reminder_intent(int_chat_id, user_name, msg['message'])
-                                
-                                # Try to create the reminder
+                            # Get the user name from the first message
+                            user_name = messages[0]['metadata'].get('user_name', 'User')
+                            
+                            # Process the reminder intent
+                            decision = process_reminder_intent(chat_id, user_name, combined_text)
+                            
+                            # Create the reminder if ready
+                            if decision.get('ready_to_create', False):
+                                from modules.reminder_handler import create_reminder
                                 success, response = create_reminder(decision)
                                 
                                 if success:
-                                    # Use direct API call for the response
-                                    from config import Config
-                                    import requests
+                                    # Mark messages as processed
+                                    for msg in messages:
+                                        self.meta_context.context_collection.update(
+                                            ids=[msg['id']],
+                                            metadatas=[{**msg['metadata'], "processed": "true"}]
+                                        )
                                     
-                                    telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_API_TOKEN}/sendMessage"
-                                    payload = {
-                                        "chat_id": int_chat_id,
-                                        "text": response,
-                                        "parse_mode": "HTML"
-                                    }
+                                    # Send the confirmation message
+                                    if self.bot:
+                                        try:
+                                            asyncio.run(self._send_telegram_message(chat_id, response))
+                                            self.store_bot_response(chat_id, response)
+                                        except Exception as e:
+                                            logging.error(f"Error sending confirmation: {e}")
+                                            
+                                    total_batches_processed += 1
+                        else:
+                            # For other intents, use ollama
+                            context_text = "\n".join([f"{msg['role']}: {msg['text']}" for msg in context_messages])
+                            
+                            # Create prompt with context
+                            prompt = f"Previous messages:\n{context_text}\n\nUser: {combined_text}"
+                            
+                            # Log the prompt being sent to Ollama
+                            logging.info(f"Sending prompt to Ollama: {prompt[:100]}...")
+                            
+                            # Get response from Ollama
+                            response = process_message(prompt)
+                            
+                            # Log the generated response
+                            logging.info(f"Generated response for batch {batch_id}: {response[:50]}...")
+                            
+                            # Send the response
+                            if self.bot:
+                                try:
+                                    asyncio.run(self._send_telegram_message(chat_id, response))
+                                    self.store_bot_response(chat_id, response)
+                                    logging.info(f"Successfully sent message to {chat_id} for batch {batch_id}")
+                                except Exception as e:
+                                    logging.error(f"Error sending message: {e}")
                                     
-                                    api_response = requests.post(telegram_url, json=payload)
-                                    if api_response.status_code == 200:
-                                        self.store_bot_response(chat_id, response, msg['metadata'].get('user_id', None))
-                                        logging.info(f"Successfully sent reminder confirmation to {chat_id}")
-                                    else:
-                                        logging.error(f"Failed to send reminder response: {api_response.status_code} - {api_response.text}")
-                                
-                                # Mark the message as processed
+                            # Mark messages as processed
+                            for msg in messages:
                                 self.meta_context.context_collection.update(
-                                    ids=[msg['pin_id']],
+                                    ids=[msg['id']],
                                     metadatas=[{**msg['metadata'], "processed": "true"}]
                                 )
-                            
+                                
                             total_batches_processed += 1
-                            continue  # Skip the standard processing below
-                        
-                        # Add to _check_pending_pins method after intent classification
-                        combined_text = "\n".join(message_texts)
-
-                        if intent == "reminder" or "remind" in combined_text.lower():
-                            # Extract time information
-                            from modules.time_extractor import extract_time
-                            time_info = extract_time(combined_text)
-                            
-                            if time_info and time_info.get('due_timestamp'):
-                                # Create the reminder
-                                from modules.reminder_handler import create_reminder
-                                reminder_data = {
-                                    "user_id": chat_id,
-                                    "user_name": messages[0]['metadata'].get('user_name', 'User'),
-                                    "time_info": time_info,
-                                    "due_time": time_info['due_timestamp'],
-                                    "reminder_message": combined_text,
-                                    "timestamp": time.time()
-                                }
-                                success, response_message = create_reminder(reminder_data)
-                                
-                                # Modify the response to confirm reminder creation
-                                if success:
-                                    response = f"✅ {response_message}"
-                                else:
-                                    response = f"❌ {response_message}"
-
-                        # Get conversation history for context
-                        conversation_history = ""
-                        try:
-                            # Get recent history before this batch
-                            history_results = self.meta_context.context_collection.get(
-                                where={
-                                    "$and": [
-                                        {"chat_id": chat_id}, 
-                                        {"timestamp": {"$lt": start_time - 10}}
-                                    ]
-                                },
-                                include=["metadatas", "documents"],
-                                limit=10
-                            )
-
-                            # Then filter event types manually:
-                            filtered_results = {
-                                'ids': [],
-                                'metadatas': [],
-                                'documents': []
-                            }
-
-                            for i, doc_id in enumerate(history_results['ids']):
-                                metadata = history_results['metadatas'][i]
-                                if metadata.get('event_type') in ["message_received", "message_sent"]:
-                                    filtered_results['ids'].append(doc_id)
-                                    filtered_results['metadatas'].append(metadata)
-                                    filtered_results['documents'].append(history_results['documents'][i])
-                            
-                            # Format conversation history
-                            if history_results and len(history_results.get('ids', [])) > 0:
-                                # Create tuples of (timestamp, index) for sorting
-                                timestamps = [(float(history_results['metadatas'][i].get('timestamp', 0)), i) 
-                                             for i in range(len(history_results['ids']))]
-                                # Sort by timestamp (descending)
-                                sorted_indices = [idx for _, idx in sorted(timestamps, reverse=True)]
-                                # Use sorted indices to access the results
-                                sorted_messages = []
-                                for idx in sorted_indices:
-                                    msg_type = history_results['metadatas'][idx].get('event_type')
-                                    sender = "User" if msg_type == "message_received" else "Bot"
-                                    sorted_messages.append(f"{sender}: {history_results['documents'][idx]}")
-                                
-                                conversation_history = "\n".join(sorted_messages)
-                                logging.info(f"Found {len(history_results['ids'])} previous messages for context")
-                        except Exception as history_err:
-                            logging.error(f"Error retrieving conversation history: {history_err}")
-                        
-                        # Create the prompt using PromptManager
-                        if len(messages) > 1:
-                            # For multiple messages, use batch template
-                            prompt = PromptManager.create_batch_prompt(
-                                message_texts, 
-                                time_gap=time_range
-                            )
-                        else:
-                            # For single message
-                            prompt = message_texts[0]
-                        
-                        # Add conversation history if available
-                        if conversation_history:
-                            prompt = PromptManager.format_prompt(
-                                "with_context",
-                                context=conversation_history,
-                                message=prompt
-                            )
-                        
-                        # Get appropriate system prompt for this intent
-                        system_role = intent if intent in PromptManager.SYSTEM_PROMPTS else "general"
-                        
-                        # Generate response with the appropriate system prompt
-                        response = process_message(
-                            message=prompt, 
-                            system_role=system_role
-                        )
-                        
-                        # Post-process the response
-                        response = PromptManager.post_process_response(response)
-                        
-                        # Validate response
-                        if not response or len(response.strip()) == 0:
-                            response = PromptManager.get_fallback_response(intent)
-                        
-                        logging.info(f"Generated response for batch {batch_id}: {response[:50]}...")
-                        
-                        # Direct telegram API call (synchronous)
-                        from config import Config
-                        import requests
-                        
-                        # Use direct API call instead of async methods
-                        telegram_url = f"https://api.telegram.org/bot{Config.TELEGRAM_API_TOKEN}/sendMessage"
-                        payload = {
-                            "chat_id": int(chat_id),
-                            "text": response,
-                            "parse_mode": "HTML"
-                        }
-                        
-                        # Replace the API response section in _check_pending_pins with:
-                        api_response = requests.post(telegram_url, json=payload)
-                        if api_response.status_code == 200:
-                            # Successfully sent message, now store it in context
-                            user_id = messages[0]['metadata'].get('user_id', None)
-                            self.store_bot_response(chat_id, response, user_id)
-                            logging.info(f"Successfully sent message to {chat_id} for batch {batch_id}")
-                        else:
-                            logging.error(f"Failed to send message: {api_response.status_code} - {api_response.text}")
-                        
-                        # Mark all messages in this batch as processed
-                        for msg in messages:
-                            self.meta_context.context_collection.update(
-                                ids=[msg['pin_id']],
-                                metadatas=[{**msg['metadata'], "processed": "true"}]
-                            )
-                        
-                        total_batches_processed += 1
-                            
-                    except Exception as e:
-                        logging.error(f"Error processing batch {batch_id} for chat {chat_id}: {e}", exc_info=True)
                     
+                    except Exception as e:
+                        logging.error(f"Error processing batch {batch_id} for chat {chat_id}: {e}")
+                
             # Log summary
             num_chats = len(conversation_batches)
             total_msgs = sum(len(msg) for chat_batches in conversation_batches.values() for msg in chat_batches.values())
@@ -512,7 +416,7 @@ class ContextScheduler:
             if total_msgs > 0:
                 logging.info(f"Found {total_msgs} pending messages in {total_batches} conversation batches across {num_chats} chats")
                 logging.info(f"Successfully processed {total_batches_processed}/{total_batches} conversation batches")
-                
+            
         except Exception as e:
             logging.error(f"Error checking pending pins: {e}", exc_info=True)
     
@@ -620,6 +524,38 @@ class ContextScheduler:
         if self.scheduler_thread and self.scheduler_thread.is_alive():
             self.scheduler_thread.join(timeout=1.0)
         logging.info("Context scheduler stopped")
+
+    def _get_context_messages(self, chat_id, limit=10):
+        """Get recent conversation messages for context."""
+        try:
+            # Get recent messages for this chat
+            events = self.meta_context.get_context_window(
+                chat_id=chat_id,
+                event_types=["message_received", "message_sent"],
+                limit=limit
+            )
+            
+            # Format messages for context
+            context_messages = []
+            for event in events:
+                metadata = event["metadata"]
+                is_user = metadata.get("event_type") == "message_received"
+                
+                context_messages.append({
+                    "role": "user" if is_user else "bot",
+                    "text": event["data"],
+                    "timestamp": float(metadata.get("timestamp", 0))
+                })
+            
+            # Sort by timestamp
+            context_messages.sort(key=lambda x: x["timestamp"])
+            
+            # Return the most recent messages up to the limit
+            return context_messages[-limit:]
+        
+        except Exception as e:
+            logging.error(f"Error getting context messages: {e}")
+            return []
 
 # Create a singleton accessor
 _context_scheduler_instance = None

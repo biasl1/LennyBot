@@ -7,47 +7,39 @@ from config import Config
 from modules.prompts import PromptManager
 
 def process_message(message, system_role="general"):
-    """Process a message through Ollama API using requests."""
+    """Process a message through Gemini API."""
     try:
         system_prompt = PromptManager.SYSTEM_PROMPTS.get(system_role, PromptManager.SYSTEM_PROMPTS["general"])
         
-        # Force conversational style with explicit formatting
-        system_prompt += """
-
-FINAL REMINDER: 
-- YOU ARE REPLYING IN A CASUAL CONVERSATION
-- SPEAK DIRECTLY TO THE PERSON
-- NEVER ANALYZE WHAT THEY SAID
-- BE BRIEF AND FRIENDLY"""
-        
         # Log shortened prompt for debugging
-        logging.info(f"Sending prompt to Ollama: {message[:100]}...")
+        logging.info(f"Sending prompt to Gemini: {message[:100]}...")
         
         start_time = time.time()
         
-        # Create the payload for the Ollama API
+        # Gemini API endpoint and key
+        api_url = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
+        api_key = Config.GEMINI_API_KEY
+        
+        # Create the payload for Gemini API
         payload = {
-            "model": "phi",  # Using phi as in the original code
-            "messages": [
+            "contents": [
                 {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                {
-                    "role": "user", 
-                    "content": message
+                    "role": "user",
+                    "parts": [
+                        {"text": f"System instructions: {system_prompt}\n\nUser message: {message}"}
+                    ]
                 }
             ],
-            "stream": False,
-            "options": {
+            "generationConfig": {
                 "temperature": 0.8,
-                "top_p": 0.9
+                "topP": 0.9,
+                "maxOutputTokens": 1024
             }
         }
         
         # Make the API request
         response = requests.post(
-            "http://localhost:11434/api/chat",
+            f"{api_url}?key={api_key}",
             json=payload,
             headers={"Content-Type": "application/json"}
         )
@@ -56,7 +48,8 @@ FINAL REMINDER:
         if response.status_code == 200:
             try:
                 response_data = response.json()
-                response_text = response_data.get('message', {}).get('content', '')
+                # Extract text from Gemini response format
+                response_text = response_data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
                 
                 if not response_text:
                     return create_contextual_fallback(message)
@@ -65,16 +58,16 @@ FINAL REMINDER:
                 logging.warning(f"JSON decode error. Response text: {response.text[:200]}...")
                 return create_contextual_fallback(message)
         else:
-            logging.error(f"Ollama API error: {response.status_code}, {response.text[:200]}")
+            logging.error(f"Gemini API error: {response.status_code}, {response.text[:200]}")
             return create_contextual_fallback(message)
         
         duration = time.time() - start_time
         
         # Log the response and time
-        logging.info(f"Raw Ollama response text: {response_text[:100]}...")
-        logging.info(f"Ollama response time: {duration:.2f}s")
+        logging.info(f"Raw Gemini response text: {response_text[:100]}...")
+        logging.info(f"Gemini response time: {duration:.2f}s")
         
-        # Apply aggressive post-processing to eliminate analytical language
+        # Apply post-processing to eliminate analytical language
         clean_response = PromptManager.post_process_response(response_text)
         
         return clean_response
